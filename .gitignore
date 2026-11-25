@@ -1,0 +1,10 @@
+target/
+.scala-build/
+.bsp/
+.metals/
+.bloop/
+.idea/
+.vscode/
+.DS_Store
+__pycache__/
+project/project/
