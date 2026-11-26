@@ -1,0 +1,109 @@
+package org.typelevel.log4cats.experimental.otel
+
+import cats.Applicative
+import cats.effect.{IO, IOLocal, Ref}
+import cats.mtl.LiftValue
+import cats.syntax.all._
+import munit.CatsEffectSuite
+import org.typelevel.otel4s.oteljava.testkit.logs.LogsTestkit
+
+final class OtelFactorySuite extends CatsEffectSuite {
+  test("safe binding stays in the caller effect and each native logger is resolved only once") {
+    LogsTestkit.inMemory[IO]().use { kit =>
+      for {
+        local   <- IOLocal("startup")
+        lookups <- Ref.of[IO, Vector[String]](Vector.empty)
+        lift = new LiftValue[IO, IO] {
+          def applicativeF: Applicative[IO] = Applicative[IO]
+          def applicativeG: Applicative[IO] = Applicative[IO]
+          def apply[A](fa: IO[A]): IO[A]    = IO.cede *> local.get.flatMap(value => lookups.update(_ :+ value)) *> fa
+        }
+        provider = kit.loggerProvider.liftTo[IO](implicitly[cats.Monad[IO]], lift)
+        _ <- Otel.resource(provider).use { factory =>
+          val safe = factory.fromName("safe.component")
+          for {
+            before       <- lookups.get
+            _            <- IO(assertEquals(before, Vector.empty[String]))
+            _            <- local.set("caller")
+            safeLogger   <- safe
+            afterSafe    <- lookups.get
+            _            <- IO(assertEquals(afterSafe, Vector("caller")))
+            unsafeLogger <- IO.blocking(factory.fromNameUnsafe("unsafe.component"))
+            afterUnsafe  <- lookups.get
+            _            <- IO(assertEquals(afterUnsafe.size, 2))
+            _            <- safeLogger.info("one") *> safeLogger.info("two") *> unsafeLogger.info("three")
+            records      <- kit.finishedLogs
+          } yield assertEquals(
+            records.map(_.getInstrumentationScopeInfo.getName).toVector,
+            Vector("safe.component", "safe.component", "unsafe.component")
+          )
+        }
+      } yield ()
+    }
+  }
+
+  test("factory Resource release shuts down unsafe lookup without closing the provider") {
+    LogsTestkit.inMemory[IO]().use { kit =>
+      for {
+        allocated <- Otel.resource(kit.loggerProvider).allocated
+        (factory, close) = allocated
+        _       <- IO.blocking(factory.fromNameUnsafe("before-close")).guarantee(close)
+        failed  <- IO.blocking(factory.fromNameUnsafe("after-close")).attempt
+        _       <- Otel.resource(kit.loggerProvider).use(_.fromName("still-open").flatMap(_.info("open")))
+        records <- kit.finishedLogs
+      } yield {
+        assert(failed.swap.exists(_.isInstanceOf[IllegalStateException]))
+        assertEquals(records.size, 1)
+      }
+    }
+  }
+  test("direct records capture execution context and encode structured events and exceptions") {
+    val producer = org.typelevel.otel4s.oteljava.context.Context.wrap(
+      io.opentelemetry.api.trace.Span
+        .wrap(
+          io.opentelemetry.api.trace.SpanContext.create(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef",
+            io.opentelemetry.api.trace.TraceFlags.getSampled,
+            io.opentelemetry.api.trace.TraceState.getDefault
+          )
+        )
+        .storeInContext(io.opentelemetry.context.Context.root())
+    )
+    val cause  = new IllegalStateException("failed")
+    var builds = 0
+    LogsTestkit.inMemory[IO]().use { kit =>
+      Otel.resource(kit.loggerProvider).use { factory =>
+        for {
+          logger <- factory.fromName("checkout")
+          effect = logger.infoEvent("checkout.completed") {
+            builds += 1
+            org.typelevel.log4cats.experimental.Event
+              .body(Map("count" -> 2))
+              .withField("request.id", 42)
+              .withField("exception.message", "shadowed")
+              .withCause(cause)
+          }
+          _       <- IO(assertEquals(builds, 0))
+          _       <- kit.contextManager.scope(producer)(effect)
+          _       <- effect
+          failed  <- logger.infoEvent((throw cause): org.typelevel.log4cats.experimental.Event).attempt
+          records <- kit.finishedLogs
+        } yield {
+          import io.opentelemetry.api.common.AttributeKey
+          assertEquals(builds, 2)
+          assert(failed.swap.exists(_ eq cause))
+          assertEquals(records.size, 2)
+          assertEquals(records.head.getSpanContext.getTraceId, "0123456789abcdef0123456789abcdef")
+          assert(!records.last.getSpanContext.isValid)
+          assertEquals(records.head.getEventName, "checkout.completed")
+          assertEquals(records.head.getAttributes.get(AttributeKey.longKey("request.id")), java.lang.Long.valueOf(42))
+          assertEquals(records.head.getAttributes.get(AttributeKey.stringKey("exception.message")), "failed")
+          assert(records.head.getTimestampEpochNanos > 0L)
+          assert(records.head.getObservedTimestampEpochNanos >= records.head.getTimestampEpochNanos)
+        }
+      }
+    }
+  }
+
+}

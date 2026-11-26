@@ -15,18 +15,22 @@ ThisBuild / scalacOptions ++= {
 }
 
 val catsEffectVersion      = "3.7.1"
+val catsCoreVersion        = "2.13.0"
 val otel4sVersion          = "1.2.0"
 val munitCatsEffectVersion = "2.2.1"
 val slf4jVersion           = "2.0.18"
 val logbackVersion         = "1.5.38"
 
 lazy val testSettings = Seq(
-  libraryDependencies += "org.typelevel" %% "munit-cats-effect" % munitCatsEffectVersion % Test
+  libraryDependencies ++= Seq(
+    "org.typelevel" %% "munit-cats-effect" % munitCatsEffectVersion % Test,
+    "org.typelevel" %% "cats-effect"       % catsEffectVersion      % Test
+  )
 )
 
 lazy val root = project
   .in(file("."))
-  .aggregate(core, circe, slf4j, otel, example)
+  .aggregate(core, runtime, circe, slf4j, otel, runtimeSlf4j, runtimeOtel, example, runtimeExample)
   .settings(
     name               := "log4cats-rework-poc",
     crossScalaVersions := Nil,
@@ -37,21 +41,30 @@ lazy val core = project
   .in(file("module/core"))
   .settings(testSettings)
   .settings(
-    name := "log4cats-rework-core",
-    libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-effect" % catsEffectVersion,
-      "org.typelevel" %% "cats-mtl"    % "1.6.0",
-      "org.typelevel" %% "vault"       % "3.7.0"
-    ),
+    name                := "log4cats-rework-core",
+    libraryDependencies += "org.typelevel" %% "cats-core" % catsCoreVersion,
     libraryDependencies ++= {
       if (scalaBinaryVersion.value == "3") Nil
       else Seq("org.scala-lang" % "scala-reflect" % scalaVersion.value % Provided)
     }
   )
 
+lazy val runtime = project
+  .in(file("module/runtime"))
+  .dependsOn(core)
+  .settings(testSettings)
+  .settings(
+    name := "log4cats-rework-runtime",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-effect" % catsEffectVersion,
+      "org.typelevel" %% "cats-mtl"    % "1.6.0",
+      "org.typelevel" %% "vault"       % "3.7.0"
+    )
+  )
+
 lazy val circe = project
   .in(file("module/circe"))
-  .dependsOn(core)
+  .dependsOn(runtime)
   .settings(testSettings)
   .settings(
     name                := "log4cats-rework-circe",
@@ -65,6 +78,7 @@ lazy val slf4j = project
   .settings(
     name := "log4cats-rework-slf4j",
     libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-effect"     % catsEffectVersion,
       "org.slf4j"      % "slf4j-api"       % slf4jVersion,
       "ch.qos.logback" % "logback-classic" % logbackVersion % Test
     )
@@ -78,6 +92,7 @@ lazy val otel = project
     name               := "log4cats-rework-otel",
     crossScalaVersions := otelScalaVersions,
     libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-effect"             % catsEffectVersion,
       "org.typelevel" %% "otel4s-core-logs"        % otel4sVersion,
       "org.typelevel" %% "otel4s-oteljava"         % otel4sVersion % Test,
       "org.typelevel" %% "otel4s-oteljava-testkit" % otel4sVersion % Test
@@ -86,9 +101,20 @@ lazy val otel = project
 
 lazy val example = project
   .in(file("module/example"))
-  .dependsOn(slf4j, otel)
+  .dependsOn(slf4j)
   .settings(
     name                 := "log4cats-rework-example",
+    publish / skip       := true,
+    Compile / run / fork := true,
+    Compile / mainClass  := Some("org.typelevel.log4cats.experimental.Slf4jExample"),
+    libraryDependencies  += "ch.qos.logback" % "logback-classic" % logbackVersion % Runtime
+  )
+
+lazy val runtimeExample = project
+  .in(file("module/runtime-example"))
+  .dependsOn(runtimeSlf4j, runtimeOtel)
+  .settings(
+    name                 := "log4cats-rework-runtime-example",
     crossScalaVersions   := otelScalaVersions,
     publish / skip       := true,
     Compile / run / fork := true,
@@ -100,9 +126,31 @@ lazy val example = project
     )
   )
 
+lazy val runtimeSlf4j = project
+  .in(file("module/runtime-slf4j"))
+  .dependsOn(runtime, slf4j)
+  .settings(testSettings)
+  .settings(
+    name                := "log4cats-rework-runtime-slf4j",
+    libraryDependencies += "ch.qos.logback" % "logback-classic" % logbackVersion % Test
+  )
+
+lazy val runtimeOtel = project
+  .in(file("module/runtime-otel"))
+  .dependsOn(runtime, otel)
+  .settings(testSettings)
+  .settings(
+    name               := "log4cats-rework-runtime-otel",
+    crossScalaVersions := otelScalaVersions,
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "otel4s-oteljava"         % otel4sVersion % Test,
+      "org.typelevel" %% "otel4s-oteljava-testkit" % otel4sVersion % Test
+    )
+  )
+
 addCommandAlias(
   "ci",
-  ";fmtCheck;+test;example/run;example/runMain org.typelevel.log4cats.experimental.AsyncOutputExample;example/runMain org.typelevel.log4cats.experimental.PreparedDeliveryExample"
+  ";fmtCheck;+test;example/run;runtimeExample/run;runtimeExample/runMain org.typelevel.log4cats.experimental.AsyncOutputExample;runtimeExample/runMain org.typelevel.log4cats.experimental.PreparedDeliveryExample"
 )
 
 addCommandAlias("fmt", ";+scalafmtAll;scalafmtSbt")

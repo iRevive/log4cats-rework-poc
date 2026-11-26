@@ -2,7 +2,7 @@ package consumer
 
 import cats.effect.IO
 import munit.CatsEffectSuite
-import org.typelevel.log4cats.experimental.backend.Body
+import org.typelevel.log4cats.experimental.Body
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.value.Value
 import org.typelevel.log4cats.experimental.{Event, Fields, Level, Logger, RecordWriter}
