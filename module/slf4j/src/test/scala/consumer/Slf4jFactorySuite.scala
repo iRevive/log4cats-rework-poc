@@ -116,7 +116,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         local <- IOLocal(Fields(Field("request.id", "parent"), Field("attempt", 1)))
         reads <- Ref.of[IO, Int](0)
         source = ContextSource(reads.update(_ + 1) *> local.get) ++
-          ContextSource(IO.pure(Fields(Field("service", "checkout"))))
+          ContextSource.const[IO](Fields(Field("service", "checkout")))
         factory <- Slf4j.factory[IO](native, source)
         logger  <- factory.fromName("contextual")
         effect = logger.infoEvent("checkout.completed") {
@@ -166,7 +166,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
       })
       var builds = 0
       for {
-        factory <- Slf4j.factory[IO](native, IO.pure(Fields(Field("request.id", "req-42"))))
+        factory <- Slf4j.factory[IO](native, ContextSource.const[IO](Fields(Field("request.id", "req-42"))))
         logger  <- factory.fromName("filtered")
         _       <- logger.infoEvent("checkout.completed") { builds += 1; Event.message("accepted") }
         _       <- logger.info { builds += 1; "rejected" }
@@ -185,7 +185,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         try {
           org.slf4j.MDC.clear()
           org.slf4j.MDC.put("host", "retained")
-          val context = SyncIO.pure(Fields(Field("request.id", "req-42")))
+          val context = ContextSource.const[SyncIO](Fields(Field("request.id", "req-42")))
           val factory = Slf4j.factory[SyncIO](native, context).unsafeRunSync()
           val logger  = factory.fromNameUnsafe("restoration")
           logger.info("success").unsafeRunSync()
@@ -230,7 +230,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
       val failure = new RuntimeException("context failure")
       var builds  = 0
       for {
-        factory <- Slf4j.factory[IO](native, IO.raiseError[Fields](failure))
+        factory <- Slf4j.factory[IO](native, ContextSource(IO.raiseError[Fields](failure)))
         logger  <- factory.fromName("failed-context")
         effect = logger.info { builds += 1; "unreachable" }
         result <- effect.attempt

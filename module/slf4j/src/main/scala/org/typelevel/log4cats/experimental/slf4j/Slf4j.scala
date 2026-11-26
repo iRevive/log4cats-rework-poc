@@ -3,7 +3,7 @@ package org.typelevel.log4cats.experimental.slf4j
 import cats.effect.Sync
 import cats.syntax.all._
 import org.slf4j.{ILoggerFactory, LoggerFactory => JLoggerFactory}
-import org.typelevel.log4cats.experimental.{Fields, Logger, LoggerFactory, Scope}
+import org.typelevel.log4cats.experimental.{Logger, LoggerFactory, Scope}
 import org.typelevel.log4cats.experimental.context.ContextSource
 
 object Slf4j {
@@ -11,26 +11,17 @@ object Slf4j {
   def factoryUnsafe[F[_]: Sync]: LoggerFactory[F] =
     factoryUnsafe(ContextSource.empty[F])
 
-  def factoryUnsafe[F[_]: Sync](context: F[Fields]): LoggerFactory[F] =
-    factoryUnsafe(ContextSource(context))
-
   def factoryUnsafe[F[_]: Sync](context: ContextSource[F]): LoggerFactory[F] =
     createFactory(JLoggerFactory.getILoggerFactory, context)
 
   def factory[F[_]: Sync]: F[LoggerFactory[F]] =
     factory(ContextSource.empty[F])
 
-  def factory[F[_]: Sync](context: F[Fields]): F[LoggerFactory[F]] =
-    factory(ContextSource(context))
-
   def factory[F[_]: Sync](context: ContextSource[F]): F[LoggerFactory[F]] =
     Sync[F].delay(createFactory(JLoggerFactory.getILoggerFactory, context))
 
   def factory[F[_]](native: ILoggerFactory)(implicit F: Sync[F]): F[LoggerFactory[F]] =
     factory(native, ContextSource.empty[F])
-
-  def factory[F[_]](native: ILoggerFactory, context: F[Fields])(implicit F: Sync[F]): F[LoggerFactory[F]] =
-    factory(native, ContextSource(context))
 
   def factory[F[_]](native: ILoggerFactory, context: ContextSource[F])(implicit F: Sync[F]): F[LoggerFactory[F]] =
     F.pure(createFactory(native, context))

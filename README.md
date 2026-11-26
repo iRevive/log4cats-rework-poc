@@ -19,11 +19,13 @@ for {
 
 `Slf4j.factory` also accepts an explicit `org.slf4j.ILoggerFactory`. Named loggers retain native
 handles and respect native level configuration. SLF4J owns timestamps and output configuration.
-For dynamic fields, pass a core `ContextSource[F]` or a plain `F[Fields]`, for example
-`Slf4j.factory[IO](context = local.get)` with an `IOLocal[Fields]`.
-Combine sources with `requestSource ++ telemetrySource`: reads run left to right and later fields
-win. The combined reader runs once per logging execution. Context fields and per-call fields are emitted as
-structured key-value pairs and mirrored into MDC strings, supporting Logback `%X{request.id}`.
+Native checks and emission use `F.delay`, with no blocking-pool boundary.
+For dynamic fields, pass a core `ContextSource[F]`, for example
+`Slf4j.factory[IO](ContextSource(local.get))` with an `IOLocal[Fields]`.
+Construct sources with `ContextSource(effect)`, `ContextSource.const(fields)`, or
+`ContextSource.fromAsk(ask)`. Combine them with `requestSource ++ telemetrySource`: reads run left
+to right and later fields win. The combined reader runs once per logging execution. Context fields
+and per-call fields are emitted as structured key-value pairs and mirrored into MDC strings, supporting Logback `%X{request.id}`.
 Per-call fields override context fields. Unrelated thread MDC entries are excluded during logging
 and restored afterward.
 
@@ -31,8 +33,8 @@ and restored afterward.
 lookup, while the supplied provider remains application-owned. `Otel.resource(provider, source)`
 also accepts the shared field-only context source.
 
-A separate optional runtime explores filters, context sources, fan-out, prepared records, and async
-delivery. See [MixedOutputExample](module/runtime-example/src/main/scala/org/typelevel/log4cats/experimental/MixedOutputExample.scala).
+A separate optional runtime explores filters, context-source placement, fan-out, prepared records,
+and async delivery. See [MixedOutputExample](module/runtime-example/src/main/scala/org/typelevel/log4cats/experimental/MixedOutputExample.scala).
 The [source map](SOURCE_MAP.md) explains both paths, module boundaries, and review questions.
 
 ## Run
@@ -68,6 +70,12 @@ for sibling outputs with `OtelBackend.resource(provider, fields)`.
 | `module/circe` | JSON encoding and runtime output adapter | 2.12, 2.13, 3 |
 | `module/example` | Direct SLF4J example | 2.12, 2.13, 3 |
 | `module/runtime-example` | Runtime composition examples | 2.13, 3 |
+
+`slf4j` and `otel` depend on core and provide direct `LoggerFactory` implementations.
+`runtime-slf4j` depends on runtime and slf4j; `runtime-otel` depends on runtime and otel. These
+adapters reuse the native implementations and expose `Backend` values for pipeline composition.
+Direct integration users do not need either runtime adapter. Core depends on Cats and cats-mtl;
+cats-effect is used by the integrations and runtime. All modules currently target the JVM.
 
 Versions are pinned in [build.sbt](build.sbt). Run `sbt fmt` to format or `sbt fmtCheck` to check.
 

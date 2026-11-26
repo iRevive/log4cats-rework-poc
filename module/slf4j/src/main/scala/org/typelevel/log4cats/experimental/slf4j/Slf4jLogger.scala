@@ -27,7 +27,7 @@ private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: Con
 
   private def isEnabled(level: Level, fields: Fields, eventName: Option[String]): F[Boolean] =
     F.delay(mdcFields(encodeFields(fields, eventName), eventName))
-      .flatMap(fields => F.blocking(withMdc(fields)(native.isEnabledForLevel(severity(level)))))
+      .flatMap(fields => F.delay(withMdc(fields)(native.isEnabledForLevel(severity(level)))))
 
   def prepare(
       level: Level,
@@ -81,7 +81,7 @@ private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: Con
       cause: Option[Throwable]
   ): F[Unit] = {
     val mdc = mdcFields(fields, eventName)
-    F.blocking {
+    F.delay {
       withMdc(mdc) {
         // Builders and MDC installation stay within one synchronous emission, including replay.
         val builder = native.atLevel(severity(level)).setMessage(message)
