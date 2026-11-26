@@ -7,7 +7,6 @@ import org.typelevel.log4cats.experimental.backend.{Backend, BoundBackend, Encod
 import org.typelevel.log4cats.experimental.console.ConsoleBackend
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
 import org.typelevel.log4cats.experimental.{LoggerFactory, Scope}
-import org.typelevel.vault.Vault
 
 final class LoggerFactorySuite extends CatsEffectSuite {
   test("all factory methods create lightweight loggers over one acquired destination") {
@@ -18,7 +17,7 @@ final class LoggerFactorySuite extends CatsEffectSuite {
       events       <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
       backend = ValueBackend[IO](
         e => events.update(_ :+ e),
-        captures.update(_ + 1).as(Vault.empty),
+        captures.update(_ + 1).as(()),
         (_, _) => IO.pure(true)
       )
       plan = Pipeline.fromBackend[IO](
@@ -52,7 +51,7 @@ final class LoggerFactorySuite extends CatsEffectSuite {
   test("safe factory methods use effectful binding and retain handles across logging calls") {
     val safeBinds   = new java.util.concurrent.atomic.AtomicInteger(0)
     val unsafeBinds = new java.util.concurrent.atomic.AtomicInteger(0)
-    val output = ValueBackend[IO](_ => IO.unit, IO.pure(Vault.empty), (_, _) => IO.pure(true)).bindUnsafe(Scope("test"))
+    val output      = ValueBackend[IO](_ => IO.unit, IO.pure(()), (_, _) => IO.pure(true)).bindUnsafe(Scope("test"))
     val backend = new Backend[IO] {
       def bind(scope: Scope): IO[BoundBackend[IO]] =
         IO { safeBinds.incrementAndGet(); output }
@@ -100,7 +99,7 @@ final class LoggerFactorySuite extends CatsEffectSuite {
         event =>
           (if (event.meta.scope.name == "first") entered.complete(()).void *> release.get else IO.unit) *>
             recorded.update(_ :+ event.meta.scope.name),
-        IO.pure(Vault.empty),
+        IO.pure(()),
         (_, _) => IO.pure(true)
       )
       plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend)).async(1)

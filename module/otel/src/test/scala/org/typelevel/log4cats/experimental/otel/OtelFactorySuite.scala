@@ -4,6 +4,8 @@ import cats.Applicative
 import cats.effect.{IO, IOLocal, Ref}
 import cats.mtl.LiftValue
 import cats.syntax.all._
+import org.typelevel.log4cats.experimental.{Field, Fields}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import munit.CatsEffectSuite
 import org.typelevel.otel4s.oteljava.testkit.logs.LogsTestkit
 
@@ -70,10 +72,15 @@ final class OtelFactorySuite extends CatsEffectSuite {
         )
         .storeInContext(io.opentelemetry.context.Context.root())
     )
-    val cause  = new IllegalStateException("failed")
-    var builds = 0
+    val cause        = new IllegalStateException("failed")
+    var builds       = 0
+    var contextReads = 0
+    val source = ContextSource(IO {
+      contextReads += 1
+      Fields(Field("service", "checkout"), Field("request.id", -1))
+    })
     LogsTestkit.inMemory[IO]().use { kit =>
-      Otel.resource(kit.loggerProvider).use { factory =>
+      Otel.resource(kit.loggerProvider, source).use { factory =>
         for {
           logger <- factory.fromName("checkout")
           effect = logger.infoEvent("checkout.completed") {
@@ -92,11 +99,13 @@ final class OtelFactorySuite extends CatsEffectSuite {
         } yield {
           import io.opentelemetry.api.common.AttributeKey
           assertEquals(builds, 2)
+          assertEquals(contextReads, 3)
           assert(failed.swap.exists(_ eq cause))
           assertEquals(records.size, 2)
           assertEquals(records.head.getSpanContext.getTraceId, "0123456789abcdef0123456789abcdef")
           assert(!records.last.getSpanContext.isValid)
           assertEquals(records.head.getEventName, "checkout.completed")
+          assertEquals(records.head.getAttributes.get(AttributeKey.stringKey("service")), "checkout")
           assertEquals(records.head.getAttributes.get(AttributeKey.longKey("request.id")), java.lang.Long.valueOf(42))
           assertEquals(records.head.getAttributes.get(AttributeKey.stringKey("exception.message")), "failed")
           assert(records.head.getTimestampEpochNanos > 0L)

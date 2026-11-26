@@ -15,7 +15,6 @@ import org.typelevel.log4cats.experimental.encoding.ValueEncoding
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
 import org.typelevel.log4cats.experimental.{Level, Scope}
-import org.typelevel.vault.Vault
 
 final class BackendPreparationSuite extends CatsEffectSuite {
   test("an external backend constructs a prepared delivery and replays only its emission") {
@@ -23,12 +22,16 @@ final class BackendPreparationSuite extends CatsEffectSuite {
       preparations <- Ref.of[IO, Int](0)
       emitted      <- Ref.of[IO, Vector[Value]](Vector.empty)
       backend = new BoundBackend[IO] {
-        type Repr = Value
-        def encoding: ValueEncoding[Value]                            = ValueEncoding.value
-        def capture(meta: EventMeta): IO[Vault]                       = IO.pure(Vault.empty)
-        def accepts(meta: EventMeta, attachments: Vault): IO[Boolean] = IO.pure(true)
-        def emit(event: EncodedEvent[Value]): IO[Unit] = IO.raiseError(new AssertionError("default emission used"))
-        override protected def prepareOutput(event: CapturedEvent)(implicit F: Sync[IO]): IO[Delivery[IO]] =
+        type Context = Unit
+        type Repr    = Value
+        def encoding: ValueEncoding[Value]                       = ValueEncoding.value
+        def capture(meta: EventMeta): IO[Unit]                   = IO.pure(())
+        def accepts(meta: EventMeta, context: Unit): IO[Boolean] = IO.pure(true)
+        def emit(event: EncodedEvent[Value], context: Unit): IO[Unit] =
+          IO.raiseError(new AssertionError("default emission used"))
+        override protected def prepareOutput(event: CapturedEvent, context: Unit)(implicit
+            F: Sync[IO]
+        ): IO[Delivery[IO]] =
           preparations.update(_ + 1) *> F.delay {
             val body = event.body.encode(encoding)
             Delivery(emitted.update(_ :+ body))
@@ -55,14 +58,17 @@ final class BackendPreparationSuite extends CatsEffectSuite {
     val failure = new RuntimeException("custom preparation failed")
     for {
       emitted <- Ref.of[IO, Int](0)
-      first = ValueBackend[IO](_ => emitted.update(_ + 1), IO.pure(Vault.empty), (_, _) => IO.pure(true))
+      first = ValueBackend[IO](_ => emitted.update(_ + 1), IO.pure(()), (_, _) => IO.pure(true))
       broken = new BoundBackend[IO] {
-        type Repr = Value
+        type Context = Unit
+        type Repr    = Value
         def encoding: ValueEncoding[Value]                            = ValueEncoding.value
-        def capture(meta: EventMeta): IO[Vault]                       = IO.pure(Vault.empty)
-        def accepts(meta: EventMeta, attachments: Vault): IO[Boolean] = IO.pure(true)
-        def emit(event: EncodedEvent[Value]): IO[Unit]                = emitted.update(_ + 1)
-        override protected def prepareOutput(event: CapturedEvent)(implicit F: Sync[IO]): IO[Delivery[IO]] =
+        def capture(meta: EventMeta): IO[Unit]                        = IO.pure(())
+        def accepts(meta: EventMeta, context: Unit): IO[Boolean]      = IO.pure(true)
+        def emit(event: EncodedEvent[Value], context: Unit): IO[Unit] = emitted.update(_ + 1)
+        override protected def prepareOutput(event: CapturedEvent, context: Unit)(implicit
+            F: Sync[IO]
+        ): IO[Delivery[IO]] =
           F.raiseError(failure)
       }
       plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](first)) ++

@@ -3,12 +3,11 @@ package consumer
 import cats.effect.{IO, Resource}
 import cats.syntax.all._
 import ch.qos.logback.classic.spi.ThrowableProxy
-import ch.qos.logback.classic.util.LogbackMDCAdapter
 import ch.qos.logback.classic.{Level => LogbackLevel, LoggerContext}
 import munit.CatsEffectSuite
 import org.slf4j.Logger
 import org.typelevel.log4cats.experimental.backend.{Backend, EventMeta}
-import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.slf4j.{Slf4jBackend, Slf4jEncoding}
@@ -18,7 +17,7 @@ import scala.collection.JavaConverters._
 final class Slf4jBackendSuite extends CatsEffectSuite {
   private def recording: Resource[IO, (LoggerContext, RecordingAppender)] = Resource.make(IO {
     val context = new LoggerContext()
-    context.setMDCAdapter(new LogbackMDCAdapter())
+    context.setMDCAdapter(org.slf4j.MDC.getMDCAdapter)
     val appender = new RecordingAppender()
     appender.setContext(context)
     appender.start()
@@ -83,14 +82,14 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
           val unsafe = factory.fromNameUnsafe("unsafe")
           assertEquals(lookups.get(), 1)
           for {
-            logger      <- safe
-            _           <- IO(assertEquals(lookups.get(), 2))
-            _           <- logger.info("one") *> logger.info("two") *> unsafe.info("three")
-            _           <- IO(assertEquals(lookups.get(), 2))
-            bound       <- backend.bind(Scope("capture"))
-            attachments <- bound.capture(EventMeta(Level.Info, Scope("capture"), None, 0L))
+            logger   <- safe
+            _        <- IO(assertEquals(lookups.get(), 2))
+            _        <- logger.info("one") *> logger.info("two") *> unsafe.info("three")
+            _        <- IO(assertEquals(lookups.get(), 2))
+            bound    <- backend.bind(Scope("capture"))
+            captured <- bound.capture(EventMeta(Level.Info, Scope("capture"), None, 0L))
           } yield {
-            assertEquals(attachments.size, 0)
+            assert(bound.contextFields(captured).isEmpty)
             assertEquals(appender.events.size(), 3)
           }
         }
@@ -136,7 +135,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
           out.int64(value.toLong)
         }
       }
-      val request = ContextSource(IO.pure(LogContext(Fields(Field("request.id", "req-42"), Field("attempt", 2)))))
+      val request = ContextSource(IO.pure(Fields(Field("request.id", "req-42"), Field("attempt", 2))))
       val output  = plan(context).withFields(Fields(Field("service", "checkout"), Field("attempt", 1)))
       Pipeline.resource(output, request).use { factory =>
         val logger = factory.fromNameUnsafe("structured")
@@ -165,7 +164,9 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
               Vector[AnyRef](java.lang.Long.valueOf(1L), null)
             )
             assertEquals(overwrittenEncodes, 0)
-            assertEquals(event.getMDCPropertyMap.size(), 0)
+            assertEquals(event.getMDCPropertyMap.get("request.id"), "req-42")
+            assertEquals(event.getMDCPropertyMap.get("attempt"), "3")
+            assertEquals(event.getMDCPropertyMap.get("event.name"), "checkout.completed")
           }
       }
     }
@@ -194,6 +195,8 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
             assertEquals(fields.map(_.key), Vector("bytes", "event.name"))
             val encodedBytes = fields.head.value.asInstanceOf[java.util.Map[String, String]]
             assertEquals(encodedBytes.get("$bytes"), "AQID")
+            assertEquals(event.getMDCPropertyMap.get("bytes"), "{$bytes=AQID}")
+            assertEquals(event.getMDCPropertyMap.get("event.name"), "snapshot.event")
             intercept[UnsupportedOperationException](encodedBytes.put("new", "value"))
           }
         }

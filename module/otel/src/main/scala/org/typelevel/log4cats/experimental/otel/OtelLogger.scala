@@ -2,6 +2,7 @@ package org.typelevel.log4cats.experimental.otel
 
 import cats.effect.{Clock, Sync}
 import cats.syntax.all._
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.{Body, Fields, Level, RecordWriter}
 import org.typelevel.log4cats.experimental.encoding.FieldSink
 import org.typelevel.log4cats.experimental.internal.AccumulatingRecordWriter
@@ -9,7 +10,7 @@ import org.typelevel.otel4s.logs.{Logger, Severity}
 import org.typelevel.otel4s.{AnyValue, Attribute, AttributeKey}
 import scala.concurrent.duration.FiniteDuration
 
-private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx])(implicit
+private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx], context: ContextSource[F])(implicit
     F: Sync[F],
     clock: Clock[F]
 ) extends org.typelevel.log4cats.experimental.Logger[F] {
@@ -21,8 +22,18 @@ private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx])(
       _ <-
         if (!enabled) F.unit
         else
-          F.delay(AccumulatingRecordWriter.capture(write)).flatMap { record =>
-            prepare(level, eventName, timestamp.toNanos, record.body, record.fields, record.cause, ctx).flatten
+          F.defer(context.current).flatMap { ambient =>
+            F.delay(AccumulatingRecordWriter.capture(write)).flatMap { record =>
+              prepare(
+                level,
+                eventName,
+                timestamp.toNanos,
+                record.body,
+                ambient ++ record.fields,
+                record.cause,
+                ctx
+              ).flatten
+            }
           }
     } yield ()
   }

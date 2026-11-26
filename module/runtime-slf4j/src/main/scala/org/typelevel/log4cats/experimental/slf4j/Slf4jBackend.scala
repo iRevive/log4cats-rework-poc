@@ -13,7 +13,7 @@ import org.typelevel.log4cats.experimental.backend.{
 }
 import org.typelevel.log4cats.experimental.encoding.ValueEncoding
 import org.typelevel.log4cats.experimental.Scope
-import org.typelevel.vault.Vault
+import org.typelevel.log4cats.experimental.context.ContextSource
 
 object Slf4jBackend {
   def acquire[F[_]](implicit F: Sync[F]): F[Backend[F]] =
@@ -23,17 +23,20 @@ object Slf4jBackend {
     F.pure(new Backend[F] {
       def bind(scope: Scope): F[BoundBackend[F]] = F.delay(bindUnsafe(scope))
       def bindUnsafe(scope: Scope): BoundBackend[F] = {
-        val logger = new Slf4jLogger[F](factory.getLogger(scope.name))
+        val logger = new Slf4jLogger[F](factory.getLogger(scope.name), ContextSource.empty[F])
         new BoundBackend[F] {
-          type Repr = AnyRef
-          val encoding: ValueEncoding[AnyRef]                          = Slf4jEncoding.native
-          def capture(meta: EventMeta): F[Vault]                       = F.pure(Vault.empty)
-          def accepts(meta: EventMeta, attachments: Vault): F[Boolean] = logger.isEnabled(meta.level)
-          override protected def prepareOutput(event: CapturedEvent)(implicit S: Sync[F]): F[Delivery[F]] =
+          type Context = Unit
+          type Repr    = AnyRef
+          val encoding: ValueEncoding[AnyRef]                     = Slf4jEncoding.native
+          def capture(meta: EventMeta): F[Unit]                   = F.pure(())
+          def accepts(meta: EventMeta, context: Unit): F[Boolean] = logger.isEnabled(meta.level, meta.eventName)
+          override protected def prepareOutput(event: CapturedEvent, context: Unit)(implicit
+              S: Sync[F]
+          ): F[Delivery[F]] =
             S.map(logger.prepare(event.meta.level, event.meta.eventName, event.body, event.fields, event.cause))(
               Delivery(_)
             )
-          def emit(event: EncodedEvent[AnyRef]): F[Unit] =
+          def emit(event: EncodedEvent[AnyRef], context: Unit): F[Unit] =
             logger.emitEncoded(event.meta.level, event.meta.eventName, event.body, event.fields, event.cause)
         }
       }

@@ -4,10 +4,9 @@ import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all._
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.experimental.backend.{Backend, EncodedEvent}
-import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
 import org.typelevel.log4cats.experimental.{Event, Field, Fields, Level}
-import org.typelevel.vault.Vault
 import scala.concurrent.duration._
 
 final class PipelineTopologySuite extends CatsEffectSuite {
@@ -17,12 +16,12 @@ final class PipelineTopologySuite extends CatsEffectSuite {
     right   <- Ref.of[IO, Int](0)
     leftBackend = ValueBackend[IO](
       _ => entered.complete(()).void *> release.get,
-      IO.pure(Vault.empty),
+      IO.pure(()),
       (_, _) => IO.pure(true)
     )
     rightBackend = ValueBackend[IO](
       _ => right.update(_ + 1),
-      IO.pure(Vault.empty),
+      IO.pure(()),
       (_, _) => IO.pure(true)
     )
     a    = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](leftBackend))
@@ -51,11 +50,11 @@ final class PipelineTopologySuite extends CatsEffectSuite {
       reads  <- Ref.of[IO, Int](0)
       events <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
       source = ContextSource(
-        reads.modify(n => (n + 1, LogContext(Fields(Field("capture", n + 1)))))
+        reads.modify(n => (n + 1, Fields(Field("capture", n + 1))))
       )
       backend = ValueBackend[IO](
         e => events.update(_ :+ e),
-        IO.pure(Vault.empty),
+        IO.pure(()),
         (_, _) => IO.pure(true)
       )
       output = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend))
@@ -75,13 +74,13 @@ final class PipelineTopologySuite extends CatsEffectSuite {
     for {
       reads  <- Ref.of[IO, Int](0)
       events <- Ref.of[IO, Vector[(String, Value)]](Vector.empty)
-      source = ContextSource(reads.modify(n => (n + 1, LogContext(Fields(Field("capture", n + 1))))))
+      source = ContextSource(reads.modify(n => (n + 1, Fields(Field("capture", n + 1)))))
       output = (name: String) =>
         Pipeline.fromBackend[IO](
           Resource.pure[IO, Backend[IO]](
             ValueBackend[IO](
               event => events.update(_ :+ (name -> event.fields)),
-              IO.pure(Vault.empty),
+              IO.pure(()),
               (_, _) => IO.pure(true)
             )
           )
@@ -107,7 +106,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
       events <- Ref.of[IO, Int](0)
       backend = ValueBackend[IO](
         _ => events.update(_ + 1),
-        IO.pure(Vault.empty),
+        IO.pure(()),
         (_, _) => IO.pure(true)
       )
       plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend)).async(2).async(2)
@@ -125,7 +124,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
       release <- Deferred[IO, Unit]
       backend = ValueBackend[IO](
         _ => entered.complete(()).void *> release.get,
-        IO.pure(Vault.empty),
+        IO.pure(()),
         (_, _) => IO.pure(true)
       )
       plan = Pipeline
@@ -145,7 +144,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
     val failure = new RuntimeException("acquisition failed")
     for {
       released <- Ref.of[IO, Boolean](false)
-      backend  = ValueBackend[IO](_ => IO.unit, IO.pure(Vault.empty), (_, _) => IO.pure(true))
+      backend  = ValueBackend[IO](_ => IO.unit, IO.pure(()), (_, _) => IO.pure(true))
       first    = Pipeline.fromBackend[IO](Resource.make(IO.pure[Backend[IO]](backend))(_ => released.set(true)))
       second   = Pipeline.fromBackend[IO](throw failure)
       resource = Pipeline.runtimeResource(first ++ second)
@@ -164,7 +163,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
       events <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
       backend = ValueBackend[IO](
         e => events.update(_ :+ e),
-        IO.pure(Vault.empty),
+        IO.pure(()),
         (_, _) => IO.pure(true)
       )
       plan = Pipeline

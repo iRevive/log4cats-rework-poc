@@ -7,7 +7,7 @@ import io.opentelemetry.api.trace.{Span, SpanContext, TraceFlags, TraceState}
 import io.opentelemetry.context.{Context => JContext}
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.experimental.backend.{Backend, EncodedEvent}
-import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
 import org.typelevel.log4cats.experimental.{Event, Field, Fields, Level, Scope}
@@ -15,7 +15,6 @@ import org.typelevel.otel4s.AnyValue
 import org.typelevel.otel4s.oteljava.AnyValueConverters._
 import org.typelevel.otel4s.oteljava.context.{Context => OtelContext}
 import org.typelevel.otel4s.oteljava.testkit.logs.LogsTestkit
-import org.typelevel.vault.Vault
 
 final class OtelPipelineSuite extends CatsEffectSuite {
   private val producer = OtelContext.wrap(
@@ -38,7 +37,7 @@ final class OtelPipelineSuite extends CatsEffectSuite {
         captures <- Ref.of[IO, Int](0)
         consoleBackend = ValueBackend[IO](
           e => console.update(_ :+ e),
-          IO.pure(Vault.empty),
+          IO.pure(()),
           (_, _) => IO.pure(true)
         )
         consolePlan = Pipeline
@@ -46,13 +45,19 @@ final class OtelPipelineSuite extends CatsEffectSuite {
           .atLeast(Level.Info)
         otelPlan = Pipeline
           .fromBackend[IO](
-            OtelBackend.resource(kit.loggerProvider)
+            OtelBackend.resource(
+              kit.loggerProvider,
+              (ctx: OtelContext) => {
+                val span = Span.fromContext(ctx.underlying).getSpanContext
+                Fields(Field("trace_id", span.getTraceId), Field("span_id", span.getSpanId))
+              }
+            )
           )
           .atLeast(Level.Debug)
         plan = (consolePlan ++ otelPlan)
           .withContextSource(
             ContextSource(
-              captures.update(_ + 1).as(LogContext(Fields(Field("request.id", "request-1"))))
+              captures.update(_ + 1).as(Fields(Field("request.id", "request-1")))
             )
           )
           .async(4)
@@ -73,6 +78,16 @@ final class OtelPipelineSuite extends CatsEffectSuite {
         assertEquals(records.size, 2)
         assertEquals(local.size, 1)
         assertEquals(count, 2)
+        assertEquals(
+          local.head.fields,
+          Value.Obj(
+            Map(
+              "request.id" -> Value.Text("request-1"),
+              "trace_id"   -> Value.Text("0123456789abcdef0123456789abcdef"),
+              "span_id"    -> Value.Text("0123456789abcdef")
+            )
+          ): Value
+        )
         assertEquals(
           records.map(_.getSpanContext.getTraceId).toVector,
           Vector.fill(2)("0123456789abcdef0123456789abcdef")
@@ -157,7 +172,7 @@ final class OtelPipelineSuite extends CatsEffectSuite {
         emissions <- Ref.of[IO, Int](0)
         sink = ValueBackend[IO](
           _ => emissions.update(_ + 1),
-          IO.pure(Vault.empty),
+          IO.pure(()),
           (_, _) => IO.pure(true)
         )
         local = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](sink))

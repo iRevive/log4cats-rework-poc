@@ -41,8 +41,11 @@ lazy val core = project
   .in(file("module/core"))
   .settings(testSettings)
   .settings(
-    name                := "log4cats-rework-core",
-    libraryDependencies += "org.typelevel" %% "cats-core" % catsCoreVersion,
+    name := "log4cats-rework-core",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-core" % catsCoreVersion,
+      "org.typelevel" %% "cats-mtl"  % "1.6.0"
+    ),
     libraryDependencies ++= {
       if (scalaBinaryVersion.value == "3") Nil
       else Seq("org.scala-lang" % "scala-reflect" % scalaVersion.value % Provided)
@@ -54,12 +57,8 @@ lazy val runtime = project
   .dependsOn(core)
   .settings(testSettings)
   .settings(
-    name := "log4cats-rework-runtime",
-    libraryDependencies ++= Seq(
-      "org.typelevel" %% "cats-effect" % catsEffectVersion,
-      "org.typelevel" %% "cats-mtl"    % "1.6.0",
-      "org.typelevel" %% "vault"       % "3.7.0"
-    )
+    name                := "log4cats-rework-runtime",
+    libraryDependencies += "org.typelevel" %% "cats-effect" % catsEffectVersion
   )
 
 lazy val circe = project

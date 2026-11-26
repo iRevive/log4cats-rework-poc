@@ -8,9 +8,19 @@ import org.typelevel.log4cats.experimental.backend.{Backend, BoundBackend, Encod
 import org.typelevel.log4cats.experimental.encoding.ValueEncoding
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.value.Value
-import org.typelevel.vault.Vault
 
 final class BackendBindingSuite extends CatsEffectSuite {
+  test("native captured state cannot be substituted with another backend's context type") {
+    val mismatch = compileErrors("""
+      import cats.effect.IO
+      import org.typelevel.log4cats.experimental.backend.{BoundBackend, EventMeta}
+      val first: BoundBackend[IO] { type Context = String } = null
+      val otherContext: Int = 42
+      first.accepts(null: EventMeta, otherContext)
+    """)
+    assert(mismatch.nonEmpty)
+  }
+
   test("bound handles cannot be rebound or passed as backend factories") {
     val rebound = compileErrors("""
       import cats.effect.IO
@@ -38,11 +48,12 @@ final class BackendBindingSuite extends CatsEffectSuite {
     for {
       events <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
       handle = new BoundBackend[IO] {
-        type Repr = Value
+        type Context = Unit
+        type Repr    = Value
         val encoding: ValueEncoding[Value]                            = ValueEncoding.value
-        def capture(meta: EventMeta): IO[Vault]                       = IO.pure(Vault.empty)
-        def accepts(meta: EventMeta, attachments: Vault): IO[Boolean] = IO.pure(true)
-        def emit(event: EncodedEvent[Value]): IO[Unit]                = events.update(_ :+ event)
+        def capture(meta: EventMeta): IO[Unit]                        = IO.pure(())
+        def accepts(meta: EventMeta, context: Unit): IO[Boolean]      = IO.pure(true)
+        def emit(event: EncodedEvent[Value], context: Unit): IO[Unit] = events.update(_ :+ event)
       }
       backend = Backend.constant[IO](handle)
       safe <- backend.bind(Scope("first"))

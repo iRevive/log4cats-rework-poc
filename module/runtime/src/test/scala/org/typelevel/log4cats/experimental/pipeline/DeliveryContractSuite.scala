@@ -1,14 +1,13 @@
 package org.typelevel.log4cats.experimental.pipeline
 
-import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Deferred, IO, IOLocal, Ref, Resource}
 import cats.syntax.all._
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.experimental.backend.{Backend, BoundBackend, EncodedEvent, EventMeta}
-import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
-import org.typelevel.log4cats.experimental.{Level, Scope}
-import org.typelevel.vault.{Key, Vault}
+import org.typelevel.log4cats.experimental.{Field, Fields, Level, Scope}
 
 final class DeliveryContractSuite extends CatsEffectSuite {
   private def output(backend: Backend[IO]): Pipeline[IO] =
@@ -31,11 +30,11 @@ final class DeliveryContractSuite extends CatsEffectSuite {
       events       <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
       backend = ValueBackend[IO](
         e => events.update(_ :+ e),
-        captures.update(_ + 1).as(Vault.empty),
+        captures.update(_ + 1).as(()),
         (_, _) => IO.pure(true)
       )
       plan   = Pipeline.fromBackend[IO](Resource.eval(acquisitions.update(_ + 1).as[Backend[IO]](backend)))
-      source = ContextSource(contexts.update(_ + 1).as(LogContext()))
+      source = ContextSource(contexts.update(_ + 1).as(Fields.empty))
       _ <- Pipeline.runtimeResource(plan, source).use { runtime =>
         val prepare = runtime.prepare(Scope("replay"), Level.Info, None) { writer =>
           constructions += 1
@@ -74,14 +73,14 @@ final class DeliveryContractSuite extends CatsEffectSuite {
     val contextFailure  = new IllegalStateException("context")
     for {
       events <- Ref.of[IO, Int](0)
-      backend = ValueBackend[IO](_ => events.update(_ + 1), IO.pure(Vault.empty), (_, _) => IO.pure(true))
+      backend = ValueBackend[IO](_ => events.update(_ + 1), IO.pure(()), (_, _) => IO.pure(true))
       result <- Pipeline.runtimeResource(output(backend)).use { runtime =>
         val logger = runtime.fromNameUnsafe("callback-failure")
         val effect = logger.log(Level.Info, None, _ => throw callbackFailure)
         effect.attempt
       }
       failingSource = new ContextSource[IO] {
-        def current: IO[LogContext] = throw contextFailure
+        def current: IO[Fields] = throw contextFailure
       }
       contextResult <- Pipeline.runtimeResource(output(backend), failingSource).use { runtime =>
         val logger = runtime.fromNameUnsafe("context-failure")
@@ -95,41 +94,36 @@ final class DeliveryContractSuite extends CatsEffectSuite {
     }
   }
 
-  test("backend captures merge in order before acceptance and rejected outputs never encode") {
+  test("backend state stays typed and private while projected fields merge before acceptance") {
     for {
-      shared     <- Key.newKey[IO, String]
-      firstOnly  <- Key.newKey[IO, Int]
-      secondOnly <- Key.newKey[IO, Boolean]
-      steps      <- Ref.of[IO, Vector[String]](Vector.empty)
-      events     <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
-      firstVault  = Vault.empty.insert(shared, "first").insert(firstOnly, 1)
-      secondVault = Vault.empty.insert(shared, "second").insert(secondOnly, true)
-      check = (name: String, meta: EventMeta, vault: Vault) =>
-        steps.update(_ :+ name) *> IO {
-          assertEquals(vault.lookup(shared), Some("second"))
-          assertEquals(vault.lookup(firstOnly), Some(1))
-          assertEquals(vault.lookup(secondOnly), Some(true))
-          assertEquals(meta.level, Level.Warn)
-          assertEquals(meta.eventName, Some("captured.event"))
-        }
-      first = ValueBackend[IO](
-        e => steps.update(_ :+ "emit") *> events.update(_ :+ e),
-        steps.update(_ :+ "capture-first").as(firstVault),
-        (m, v) => check("accept-first", m, v).as(true)
-      )
-      second = new BoundBackend[IO] {
-        type Repr = Value
-        def encoding: ValueEncoding[Value]               = throw new AssertionError("rejected encoding accessed")
-        def capture(meta: EventMeta): IO[Vault]          = steps.update(_ :+ "capture-second").as(secondVault)
-        def accepts(m: EventMeta, v: Vault): IO[Boolean] = check("accept-second", m, v).as(false)
-        def emit(e: EncodedEvent[Value]): IO[Unit]       = IO.raiseError(new AssertionError("rejected output emitted"))
+      steps  <- Ref.of[IO, Vector[String]](Vector.empty)
+      events <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
+      first = new BoundBackend[IO] {
+        type Repr    = Value
+        type Context = String
+        val encoding: ValueEncoding[Value]                  = ValueEncoding.value
+        def capture(meta: EventMeta): IO[String]            = steps.update(_ :+ "capture-first").as("first")
+        override def contextFields(context: String): Fields = Fields(Field("capture", context))
+        def accepts(meta: EventMeta, context: String): IO[Boolean] =
+          steps.update(_ :+ "accept-first") *> IO { assertEquals(context, "first"); true }
+        def emit(event: EncodedEvent[Value], context: String): IO[Unit] =
+          IO(assertEquals(context, "first")) *> steps.update(_ :+ "emit") *> events.update(_ :+ event)
       }
-      source = ContextSource(
-        steps.update(_ :+ "ambient").as(LogContext(attachments = Vault.empty.insert(shared, "ambient")))
-      )
-      _ <- Pipeline.runtimeResource(output(first) ++ output(Backend.constant(second)), source).use { runtime =>
-        val logger = runtime.fromNameUnsafe("captures")
-        logger.log(Level.Warn, Some("captured.event"), _.body("ok"))
+      second = new BoundBackend[IO] {
+        type Repr    = Value
+        type Context = Int
+        def encoding: ValueEncoding[Value]               = throw new AssertionError("rejected encoding accessed")
+        def capture(meta: EventMeta): IO[Int]            = steps.update(_ :+ "capture-second").as(2)
+        override def contextFields(context: Int): Fields = Fields(Field("capture", "second"), Field("count", context))
+        def accepts(meta: EventMeta, context: Int): IO[Boolean] =
+          steps.update(_ :+ "accept-second") *> IO { assertEquals(context, 2); false }
+        def emit(event: EncodedEvent[Value], context: Int): IO[Unit] =
+          IO.raiseError(new AssertionError("rejected output emitted"))
+      }
+      source = ContextSource(steps.update(_ :+ "ambient").as(Fields(Field("capture", "ambient"))))
+      _ <- Pipeline.runtimeResource(output(Backend.constant(first)) ++ output(Backend.constant(second)), source).use {
+        runtime =>
+          runtime.fromNameUnsafe("captures").log(Level.Warn, Some("captured.event"), _.body("ok"))
       }
       recordedSteps <- steps.get
       recorded      <- events.get
@@ -139,8 +133,45 @@ final class DeliveryContractSuite extends CatsEffectSuite {
         Vector("ambient", "capture-first", "capture-second", "accept-first", "accept-second", "emit")
       )
       assertEquals(recorded.size, 1)
-      assertEquals(recorded.head.fields, Value.Obj(Map.empty): Value)
-      assertEquals(recorded.head.attachments.lookup(shared), Some("second"))
+      assertEquals(
+        recorded.head.fields,
+        Value.Obj(Map("capture" -> Value.Text("second"), "count" -> Value.Int64(2))): Value
+      )
+    }
+  }
+
+  test("typed captures and their projected fields survive queued prepared replay without recapture") {
+    for {
+      local    <- IOLocal("worker")
+      captures <- Ref.of[IO, Int](0)
+      emitted  <- Ref.of[IO, Vector[(String, String, Value)]](Vector.empty)
+      backend = new BoundBackend[IO] {
+        type Repr    = Value
+        type Context = String
+        val encoding: ValueEncoding[Value]                         = ValueEncoding.value
+        def capture(meta: EventMeta): IO[String]                   = captures.update(_ + 1) *> local.get
+        override def contextFields(context: String): Fields        = Fields(Field("trace", context))
+        def accepts(meta: EventMeta, context: String): IO[Boolean] = IO.pure(true)
+        def emit(event: EncodedEvent[Value], context: String): IO[Unit] =
+          local.get.flatMap(actual => emitted.update(_ :+ ((context, actual, event.fields))))
+      }
+      _ <- Pipeline.runtimeResource(output(Backend.constant(backend)).async(2)).use { runtime =>
+        for {
+          _        <- local.set("producer")
+          prepared <- runtime.prepare(Scope("typed"), Level.Info, None)(_.body("record"))
+          _        <- local.set("consumer")
+          _        <- prepared.deliver *> prepared.deliver
+          _        <- runtime.flush
+        } yield ()
+      }
+      count   <- captures.get
+      records <- emitted.get
+    } yield {
+      assertEquals(count, 1)
+      assertEquals(
+        records,
+        Vector.fill(2)(("producer", "worker", Value.Obj(Map("trace" -> Value.Text("producer"))): Value))
+      )
     }
   }
 
@@ -148,11 +179,13 @@ final class DeliveryContractSuite extends CatsEffectSuite {
     for {
       captures <- Ref.of[IO, Int](0)
       rejected = new BoundBackend[IO] {
-        type Repr = Value
-        def encoding: ValueEncoding[Value]                      = throw new AssertionError("rejected encoding accessed")
-        def capture(meta: EventMeta): IO[Vault]                 = captures.update(_ + 1).as(Vault.empty)
-        def accepts(meta: EventMeta, vault: Vault): IO[Boolean] = IO.pure(false)
-        def emit(event: EncodedEvent[Value]): IO[Unit] = IO.raiseError(new AssertionError("rejected output emitted"))
+        type Context = Unit
+        type Repr    = Value
+        def encoding: ValueEncoding[Value]     = throw new AssertionError("rejected encoding accessed")
+        def capture(meta: EventMeta): IO[Unit] = captures.update(_ + 1).as(())
+        def accepts(meta: EventMeta, context: Unit): IO[Boolean] = IO.pure(false)
+        def emit(event: EncodedEvent[Value], context: Unit): IO[Unit] =
+          IO.raiseError(new AssertionError("rejected output emitted"))
       }
       _ <- Pipeline.runtimeResource(output(Backend.constant(rejected))).use { runtime =>
         val logger = runtime.fromNameUnsafe("rejected")
@@ -166,9 +199,9 @@ final class DeliveryContractSuite extends CatsEffectSuite {
     val failure = new RuntimeException("emit failed")
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-      first  = ValueBackend[IO](_ => emitted.update(_ :+ "first"), IO.pure(Vault.empty), (_, _) => IO.pure(true))
-      broken = ValueBackend[IO](_ => throw failure, IO.pure(Vault.empty), (_, _) => IO.pure(true))
-      later  = ValueBackend[IO](_ => emitted.update(_ :+ "later"), IO.pure(Vault.empty), (_, _) => IO.pure(true))
+      first  = ValueBackend[IO](_ => emitted.update(_ :+ "first"), IO.pure(()), (_, _) => IO.pure(true))
+      broken = ValueBackend[IO](_ => throw failure, IO.pure(()), (_, _) => IO.pure(true))
+      later  = ValueBackend[IO](_ => emitted.update(_ :+ "later"), IO.pure(()), (_, _) => IO.pure(true))
       result <- Pipeline
         .runtimeResource(output(first) ++ output(broken) ++ output(later))
         .use { runtime =>
@@ -188,7 +221,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
       started <- Deferred[IO, Unit]
       backend = ValueBackend[IO](
         _ => started.complete(()).void *> IO.never[Unit],
-        IO.pure(Vault.empty),
+        IO.pure(()),
         (_, _) => IO.pure(true)
       )
       _ <- Pipeline.runtimeResource(output(backend)).use { runtime =>

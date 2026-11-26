@@ -2,7 +2,7 @@ package org.typelevel.log4cats.experimental
 
 import cats.effect.{IO, IOApp, Resource}
 import cats.syntax.all._
-import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.otel.OtelBackend
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
@@ -40,7 +40,7 @@ object MixedOutputExample extends IOApp.Simple {
         OtelBackend.resource(kit.loggerProvider)
       }
       .atLeast(Level.Debug)
-    val request = ContextSource(IO.pure(LogContext(Fields(Field("request.id", "req-42")))))
+    val request = ContextSource(IO.pure(Fields(Field("request.id", "req-42"))))
     val outputs = (primary ++ telemetry)
       .withFields(Fields(Field("service", "checkout")))
       .withContextSource(request)

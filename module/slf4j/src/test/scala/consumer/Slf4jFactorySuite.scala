@@ -1,22 +1,27 @@
 package consumer
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, IOLocal, Ref, Resource, SyncIO}
 import cats.syntax.all._
 import ch.qos.logback.classic.{Level => NativeLevel, LoggerContext}
 import ch.qos.logback.classic.spi.{ILoggingEvent, ThrowableProxy}
-import ch.qos.logback.classic.util.LogbackMDCAdapter
 import ch.qos.logback.core.read.ListAppender
 import munit.CatsEffectSuite
-import org.typelevel.log4cats.experimental.Event
+import org.typelevel.log4cats.experimental.{Event, Field, Fields}
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.slf4j.Slf4j
+import org.typelevel.log4cats.experimental.context.ContextSource
 import scala.collection.JavaConverters._
 
 final class Slf4jFactorySuite extends CatsEffectSuite {
   private def recording: Resource[IO, (LoggerContext, ListAppender[ILoggingEvent])] = Resource.make(IO {
     val context = new LoggerContext()
-    context.setMDCAdapter(new LogbackMDCAdapter())
-    val appender = new ListAppender[ILoggingEvent]()
+    context.setMDCAdapter(org.slf4j.MDC.getMDCAdapter)
+    val appender = new ListAppender[ILoggingEvent]() {
+      override protected def append(event: ILoggingEvent): Unit = {
+        event.prepareForDeferredProcessing()
+        super.append(event)
+      }
+    }
     appender.setContext(context)
     appender.start()
     val root = context.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME)
@@ -105,4 +110,136 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
       }
     }
   }
+  test("context is captured once per execution in the calling fiber and merged with call fields") {
+    recording.use { case (native, appender) =>
+      for {
+        local <- IOLocal(Fields(Field("request.id", "parent"), Field("attempt", 1)))
+        reads <- Ref.of[IO, Int](0)
+        source = ContextSource(reads.update(_ + 1) *> local.get) ++
+          ContextSource(IO.pure(Fields(Field("service", "checkout"))))
+        factory <- Slf4j.factory[IO](native, source)
+        logger  <- factory.fromName("contextual")
+        effect = logger.infoEvent("checkout.completed") {
+          Event.message("complete").withField("attempt", 2)
+        }
+        _ <- reads.get.flatMap(n => IO(assertEquals(n, 0)))
+        _ <- (
+          local.set(Fields(Field("request.id", "left"), Field("attempt", 1))) *> effect,
+          local.set(Fields(Field("request.id", "right"), Field("attempt", 1))) *> effect
+        ).parTupled
+        other = factory.fromNameUnsafe("other")
+        _     <- other.info("parent")
+        count <- reads.get
+      } yield {
+        assertEquals(count, 3)
+        val events = appender.list.asScala.toVector
+        assertEquals(events.take(2).map(_.getMDCPropertyMap.get("request.id")).toSet, Set("left", "right"))
+        events.take(2).foreach { event =>
+          assertEquals(event.getMDCPropertyMap.get("attempt"), "2")
+          assertEquals(event.getMDCPropertyMap.get("service"), "checkout")
+          assertEquals(event.getMDCPropertyMap.get("event.name"), "checkout.completed")
+          val fields = event.getKeyValuePairs.asScala.map(kv => kv.key -> kv.value).toMap
+          assertEquals(fields("attempt"), java.lang.Long.valueOf(2))
+          assertEquals(fields("request.id"), event.getMDCPropertyMap.get("request.id"))
+        }
+        assertEquals(events.last.getMDCPropertyMap.get("request.id"), "parent")
+      }
+    }
+  }
+
+  test("context and event name are installed for native enablement checks") {
+    recording.use { case (native, appender) =>
+      native.addTurboFilter(new ch.qos.logback.classic.turbo.TurboFilter {
+        override def decide(
+            marker: org.slf4j.Marker,
+            logger: ch.qos.logback.classic.Logger,
+            level: NativeLevel,
+            format: String,
+            params: Array[AnyRef],
+            error: Throwable
+        ): ch.qos.logback.core.spi.FilterReply =
+          if (
+            org.slf4j.MDC.get("request.id") == "req-42" &&
+            org.slf4j.MDC.get("event.name") == "checkout.completed"
+          ) ch.qos.logback.core.spi.FilterReply.ACCEPT
+          else ch.qos.logback.core.spi.FilterReply.DENY
+      })
+      var builds = 0
+      for {
+        factory <- Slf4j.factory[IO](native, IO.pure(Fields(Field("request.id", "req-42"))))
+        logger  <- factory.fromName("filtered")
+        _       <- logger.infoEvent("checkout.completed") { builds += 1; Event.message("accepted") }
+        _       <- logger.info { builds += 1; "rejected" }
+      } yield {
+        assertEquals(builds, 1)
+        assertEquals(appender.list.size(), 1)
+        assertEquals(appender.list.get(0).getMessage, "accepted")
+      }
+    }
+  }
+
+  test("MDC excludes unrelated thread state and restores it after success and native failure") {
+    recording.use { case (native, appender) =>
+      IO {
+        val previous = org.slf4j.MDC.getCopyOfContextMap
+        try {
+          org.slf4j.MDC.clear()
+          org.slf4j.MDC.put("host", "retained")
+          val context = SyncIO.pure(Fields(Field("request.id", "req-42")))
+          val factory = Slf4j.factory[SyncIO](native, context).unsafeRunSync()
+          val logger  = factory.fromNameUnsafe("restoration")
+          logger.info("success").unsafeRunSync()
+          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "retained"))
+          assertEquals(appender.list.get(0).getMDCPropertyMap.asScala.toMap, Map("request.id" -> "req-42"))
+          val failure  = new RuntimeException("native failure")
+          val delegate = native.getLogger("failure")
+          val throwing = java.lang.reflect.Proxy
+            .newProxyInstance(
+              classOf[org.slf4j.Logger].getClassLoader,
+              Array(classOf[org.slf4j.Logger]),
+              new java.lang.reflect.InvocationHandler {
+                def invoke(proxy: AnyRef, method: java.lang.reflect.Method, args: Array[AnyRef]): AnyRef = {
+                  assertEquals(org.slf4j.MDC.get("request.id"), "req-42")
+                  assertEquals(org.slf4j.MDC.get("host"), null)
+                  if (method.getName == "atLevel") throw failure
+                  method.invoke(delegate, Option(args).getOrElse(Array.empty[AnyRef]): _*)
+                }
+              }
+            )
+            .asInstanceOf[org.slf4j.Logger]
+          val throwingFactory = new org.slf4j.ILoggerFactory {
+            def getLogger(name: String): org.slf4j.Logger = throwing
+          }
+          val failed = Slf4j
+            .factory[SyncIO](throwingFactory, context)
+            .unsafeRunSync()
+            .fromNameUnsafe("failure")
+            .info("failure")
+            .attempt
+            .unsafeRunSync()
+          assert(failed.swap.exists(_ eq failure))
+          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "retained"))
+        } finally
+          if (previous == null) org.slf4j.MDC.clear() else org.slf4j.MDC.setContextMap(previous)
+      }
+    }
+  }
+
+  test("context failure is suspended and prevents callback execution and emission") {
+    recording.use { case (native, appender) =>
+      val failure = new RuntimeException("context failure")
+      var builds  = 0
+      for {
+        factory <- Slf4j.factory[IO](native, IO.raiseError[Fields](failure))
+        logger  <- factory.fromName("failed-context")
+        effect = logger.info { builds += 1; "unreachable" }
+        result <- effect.attempt
+      } yield {
+        assert(result.swap.exists(_ eq failure))
+        assertEquals(builds, 0)
+        assertEquals(appender.list.size(), 0)
+      }
+    }
+  }
+
 }

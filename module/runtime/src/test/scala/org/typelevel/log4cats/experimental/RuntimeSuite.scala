@@ -96,8 +96,7 @@ final class RuntimeSuite extends CatsEffectSuite {
       EventMeta(Level.Error, Scope("z.scope"), Some("event"), 7L),
       Value.Obj(Map("quote\"" -> Value.Text("line\n"))),
       Value.Obj(Map("z" -> Value.Int64(2), "a" -> Value.Bool(true))),
-      Some(ex),
-      org.typelevel.vault.Vault.empty
+      Some(ex)
     )
     val rendered = ConsoleRenderer.render(event)
     assert(rendered.indexOf("\"a\"") < rendered.indexOf("\"z\""))

@@ -4,13 +4,12 @@ import cats.effect.Sync
 import cats.syntax.all._
 import org.typelevel.log4cats.experimental.backend.{Backend, EventMeta}
 import org.typelevel.log4cats.experimental.value.ValueBackend
-import org.typelevel.vault.Vault
 
 object ConsoleBackend {
   def apply[F[_]](
       writeLine: String => F[Unit],
-      capture: F[Vault],
-      accepts: (EventMeta, Vault) => F[Boolean]
+      capture: F[Unit],
+      accepts: (EventMeta, Unit) => F[Boolean]
   )(implicit
       F: Sync[F]
   ): Backend[F] = ValueBackend(
@@ -21,7 +20,7 @@ object ConsoleBackend {
 
   def stdout[F[_]: Sync]: Backend[F] = apply(
     line => Sync[F].delay(println(line)),
-    Sync[F].pure(Vault.empty),
+    Sync[F].pure(()),
     (_, _) => Sync[F].pure(true)
   )
 }

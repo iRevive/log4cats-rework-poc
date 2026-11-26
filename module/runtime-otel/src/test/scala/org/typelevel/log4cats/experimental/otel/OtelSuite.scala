@@ -124,12 +124,12 @@ final class OtelSuite extends CatsEffectSuite {
           rejectedEmits <- cats.effect.Ref.of[IO, Int](0)
           console = ValueBackend[IO](
             e => consoleEvents.update(_ :+ e) *> IO { sourceValue.name = "mutated by first emitter" },
-            IO.pure(org.typelevel.vault.Vault.empty),
+            IO.pure(()),
             (_, _) => IO.pure(true)
           )
           rejected = ValueBackend[IO](
             e => rejectedEmits.update(_ + 1),
-            IO.pure(org.typelevel.vault.Vault.empty),
+            IO.pure(()),
             (_, _) => IO.pure(false)
           )
           resource = Pipeline.resource(
@@ -368,9 +368,9 @@ final class OtelSuite extends CatsEffectSuite {
         for {
           backend <- factory.bind(Scope("enabled-check"))
           meta = EventMeta(Level.Error, Scope("enabled-check"), Some("ignored-by-java-enabled-api"), 0L)
-          attachments <- otel.contextManager.scope(producer)(backend.capture(meta))
-          accepted    <- otel.contextManager.scope(consumer)(backend.accepts(meta, attachments))
-          call        <- IO(Option(enabledCalls.peek()).getOrElse(fail("isEnabled should be called")))
+          captured <- otel.contextManager.scope(producer)(backend.capture(meta))
+          accepted <- otel.contextManager.scope(consumer)(backend.accepts(meta, captured))
+          call     <- IO(Option(enabledCalls.peek()).getOrElse(fail("isEnabled should be called")))
         } yield {
           assert(accepted)
           assertEquals(call._1, JSeverity.ERROR)

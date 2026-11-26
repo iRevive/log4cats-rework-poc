@@ -7,7 +7,6 @@ import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.pipeline.internal.{AsyncDeliveryQueue, RecordPreparer}
 import org.typelevel.log4cats.experimental.internal.AccumulatingRecordWriter
 import org.typelevel.log4cats.experimental.{Fields, Level, LoggerFactory, RecordWriter, Scope}
-import org.typelevel.vault.Vault
 import scala.concurrent.duration._
 
 final class Pipeline[F[_]] private[pipeline] (private[pipeline] val node: Pipeline.Node[F]) {
@@ -177,6 +176,21 @@ object Pipeline {
       Pipeline.prepare(routing, outputs, rootContext, clock, scope, level, eventName)(write)
   }
 
+  private trait CapturedOutput[F[_]] {
+    def fields: Fields
+    def accepts: F[Boolean]
+    def prepare(event: CapturedEvent): F[Delivery[F]]
+  }
+
+  private def capture[F[_]](backend: BoundBackend[F], meta: EventMeta)(implicit F: Sync[F]): F[CapturedOutput[F]] =
+    F.defer(backend.capture(meta)).map { context =>
+      new CapturedOutput[F] {
+        val fields: Fields                                = backend.contextFields(context)
+        def accepts: F[Boolean]                           = F.defer(backend.accepts(meta, context))
+        def prepare(event: CapturedEvent): F[Delivery[F]] = backend.prepare(event, context)
+      }
+    }
+
   private def prepare[F[_]](
       routing: Routing[F],
       outputs: Vector[Output[F, BoundBackend[F]]],
@@ -199,15 +213,14 @@ object Pipeline {
           root      <- rootContext.current
           sourced   <- sources.traverse(s => s.source.current.map(s -> _))
           meta = EventMeta(level, scope, eventName, timestamp)
-          captures <- live.traverse { case (output, _) => output.backend.capture(meta) }
-          contexts = sourced.toMap
+          captures <- live.traverse { case (output, _) => capture(output.backend, meta) }
+          contexts       = sourced.toMap
+          capturedFields = captures.foldLeft(Fields.empty)((fields, captured) => fields ++ captured.fields)
           accepted <- live
-            .traverse { case (output, index) =>
-              val attachments =
-                (Vector(root.attachments) ++ output.config.sources.map(s => contexts(s).attachments) ++ captures)
-                  .foldLeft(Vault.empty)(_ ++ _)
-              output.backend.accepts(meta, attachments).map { accepts =>
-                if (accepts) Some((output, index, attachments)) else None
+            .zip(captures)
+            .traverse { case ((output, index), captured) =>
+              captured.accepts.map { accepts =>
+                if (accepts) Some((output, index, captured)) else None
               }
             }
             .map(_.flatten)
@@ -216,14 +229,14 @@ object Pipeline {
             else
               F.delay(AccumulatingRecordWriter.capture(write)).flatMap { payload =>
                 accepted
-                  .traverse { case (output, index, attachments) =>
-                    val ambient = (Vector(root.fields) ++ output.config.sources.map(s => contexts(s).fields))
+                  .traverse { case (output, index, captured) =>
+                    val ambient = (Vector(root) ++ output.config.sources.map(s => contexts(s)))
                       .foldLeft(Fields.empty)(_ ++ _)
-                    val fields = output.config.fields ++ ambient ++ payload.fields
+                    val fields = output.config.fields ++ ambient ++ capturedFields ++ payload.fields
                     if (!output.config.fieldFilters.forall(_(fields))) F.pure(Option.empty[(Int, Delivery[F])])
                     else {
-                      val event = CapturedEvent(meta, fields, payload.body, payload.cause, attachments)
-                      output.backend.prepare(event).map(delivery => Option(index -> delivery))
+                      val event = CapturedEvent(meta, fields, payload.body, payload.cause)
+                      captured.prepare(event).map(delivery => Option(index -> delivery))
                     }
                   }
                   .map(_.flatten.toMap)

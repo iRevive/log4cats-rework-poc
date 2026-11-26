@@ -9,7 +9,6 @@ import org.typelevel.log4cats.experimental.backend.{Backend, EncodedEvent}
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
 import org.typelevel.log4cats.experimental.{Event, Field, Fields}
-import org.typelevel.vault.Vault
 
 final class ContextSuite extends CatsEffectSuite {
   private type Reader[A] = Kleisli[IO, Fields, A]
@@ -18,14 +17,14 @@ final class ContextSuite extends CatsEffectSuite {
 
   test("Ask supplies ambient fields and Local scopes right-biased nested fields") {
     val ask: Ask[Reader, Fields] = readerLocal
-    val source                   = LoggingContext.fromAsk[Reader](ask)
+    val source                   = ContextSource.fromAsk[Reader](ask)
 
     val nested: Reader[(Fields, Fields, Fields)] = for {
-      before <- source.current.map(_.fields)
+      before <- source.current
       inner <- LoggingContext.withFields[Reader, Fields](Fields(Field("k", "inner"))) {
-        source.current.map(_.fields)
+        source.current
       }
-      after <- source.current.map(_.fields)
+      after <- source.current
     } yield (before, inner, after)
 
     val scoped = LoggingContext.withFields[Reader, (Fields, Fields, Fields)](
@@ -76,13 +75,13 @@ final class ContextSuite extends CatsEffectSuite {
       events <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
       backend = ValueBackend[Reader](
         event => Kleisli.liftF(events.update(_ :+ event)),
-        Kleisli.pure[IO, Fields, Vault](Vault.empty),
+        Kleisli.pure[IO, Fields, Unit](()),
         (_, _) => Kleisli.pure[IO, Fields, Boolean](true)
       )
       plan = Pipeline
         .fromBackend[Reader](Resource.pure[Reader, Backend[Reader]](backend))
         .withFields(Fields(Field("static", true)))
-      source = LoggingContext.fromAsk[Reader](readerLocal)
+      source = ContextSource.fromAsk[Reader](readerLocal)
       _ <- Pipeline
         .resource(plan, source)
         .use { factory =>

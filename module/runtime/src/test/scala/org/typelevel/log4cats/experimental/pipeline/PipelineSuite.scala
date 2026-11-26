@@ -4,18 +4,17 @@ import cats.effect.{Clock, IO, Ref, Resource, Sync}
 import cats.syntax.all._
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.experimental.backend.{Backend, EncodedEvent, EventMeta}
-import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
 import org.typelevel.log4cats.experimental.{Field, Fields, Level, LoggerFactory}
-import org.typelevel.vault.Vault
 import scala.concurrent.duration._
 
 final class PipelineSuite extends CatsEffectSuite {
   private def backend(
       write: EncodedEvent[Value] => IO[Unit],
-      capture: IO[Vault] = IO.pure(Vault.empty),
-      accepts: (EventMeta, Vault) => IO[Boolean] = (_, _) => IO.pure(true)
+      capture: IO[Unit] = IO.pure(()),
+      accepts: (EventMeta, Unit) => IO[Boolean] = (_, _) => IO.pure(true)
   ): Backend[IO] = ValueBackend[IO](write, capture, accepts)
 
   private def factoryResource(
@@ -59,13 +58,13 @@ final class PipelineSuite extends CatsEffectSuite {
       leftCount   <- Ref.of[IO, Int](0)
       rightCount  <- Ref.of[IO, Int](0)
       shared = ContextSource[IO](
-        sharedCount.update(_ + 1).as(LogContext(Fields(Field("shared", 1))))
+        sharedCount.update(_ + 1).as(Fields(Field("shared", 1)))
       )
       leftCtx = ContextSource[IO](
-        leftCount.update(_ + 1).as(LogContext(Fields(Field("key", "left-ambient"))))
+        leftCount.update(_ + 1).as(Fields(Field("key", "left-ambient")))
       )
       rightCtx = ContextSource[IO](
-        rightCount.update(_ + 1).as(LogContext(Fields(Field("key", "right-ambient"))))
+        rightCount.update(_ + 1).as(Fields(Field("key", "right-ambient")))
       )
       left = Pipeline
         .fromBackend[IO](Resource.pure(backend(e => leftFields.set(e.fields))))
@@ -128,7 +127,7 @@ final class PipelineSuite extends CatsEffectSuite {
       calls = new java.util.concurrent.atomic.AtomicInteger(0)
       left  <- Ref.of[IO, Int](0)
       right <- Ref.of[IO, Int](0)
-      src = ContextSource[IO](captures.update(_ + 1).as(LogContext()))
+      src = ContextSource[IO](captures.update(_ + 1).as(Fields.empty))
       leftPipeline = Pipeline
         .fromBackend[IO](Resource.pure(backend(_ => left.update(_ + 1))))
         .filterMetadata((level, name) => level == Level.Info && name.contains("kept"))
@@ -192,7 +191,7 @@ final class PipelineSuite extends CatsEffectSuite {
       steps :+= label
       true
     }
-    val source = ContextSource(IO { steps :+= "context"; LogContext() })
+    val source = ContextSource(IO { steps :+= "context"; Fields.empty })
     val output = Pipeline
       .fromBackend[IO](Resource.pure(backend(_ => IO.unit)))
       .atLeast(Level.Warn)
@@ -245,7 +244,7 @@ final class PipelineSuite extends CatsEffectSuite {
         def realTime: IO[FiniteDuration]      = clockReads.update(_ + 1).as(123L.nanos)
         def monotonic: IO[FiniteDuration]     = IO.pure(456L.nanos)
       }
-      context = ContextSource[IO](contextReads.update(_ + 1).as(LogContext()))
+      context = ContextSource[IO](contextReads.update(_ + 1).as(Fields.empty))
       output = Pipeline
         .fromBackend[IO](Resource.pure(backend(e => times.update(_ :+ e.meta.timestampNanos))))
         .atLeast(Level.Info)
