@@ -13,7 +13,7 @@ import org.typelevel.log4cats.experimental.backend.{
 }
 import org.typelevel.log4cats.experimental.encoding.ValueEncoding
 import org.typelevel.log4cats.experimental.Scope
-import org.typelevel.log4cats.experimental.context.ContextSource
+import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
 
 object Slf4jBackend {
   def acquire[F[_]](implicit F: Sync[F]): F[Backend[F]] =
@@ -29,15 +29,19 @@ object Slf4jBackend {
           type Repr    = AnyRef
           val encoding: ValueEncoding[AnyRef]                     = Slf4jEncoding.native
           def capture(meta: EventMeta): F[Unit]                   = F.pure(())
-          def accepts(meta: EventMeta, context: Unit): F[Boolean] = logger.isEnabled(meta.level, meta.eventName)
+          def accepts(meta: EventMeta, context: Unit): F[Boolean] = logger.isEnabled(meta.level)
+          override def acceptsWithContext(meta: EventMeta, context: Unit, data: LogContext): F[Boolean] =
+            logger.isEnabled(meta.level, data.mdc)
           override protected def prepareOutput(event: CapturedEvent, context: Unit)(implicit
               S: Sync[F]
           ): F[Delivery[F]] =
-            S.map(logger.prepare(event.meta.level, event.meta.eventName, event.body, event.fields, event.cause))(
+            S.map(
+              logger.prepare(event.meta.level, event.meta.eventName, event.body, event.fields, event.cause, event.mdc)
+            )(
               Delivery(_)
             )
           def emit(event: EncodedEvent[AnyRef], context: Unit): F[Unit] =
-            logger.emitEncoded(event.meta.level, event.meta.eventName, event.body, event.fields, event.cause)
+            logger.emitEncoded(event.meta.level, event.meta.eventName, event.body, event.fields, event.cause, event.mdc)
         }
       }
     })

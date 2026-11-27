@@ -3,10 +3,10 @@ package org.typelevel.log4cats.experimental.pipeline
 import cats.effect.{Async, Clock, Resource, Sync}
 import cats.syntax.all._
 import org.typelevel.log4cats.experimental.backend.{Backend, BoundBackend, CapturedEvent, Delivery, EventMeta}
-import org.typelevel.log4cats.experimental.context.ContextSource
+import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
 import org.typelevel.log4cats.experimental.pipeline.internal.{AsyncDeliveryQueue, RecordPreparer}
 import org.typelevel.log4cats.experimental.internal.AccumulatingRecordWriter
-import org.typelevel.log4cats.experimental.{Fields, Level, LoggerFactory, RecordWriter, Scope}
+import org.typelevel.log4cats.experimental.{Fields, Level, LoggerFactory, Mdc, RecordWriter, Scope}
 import scala.concurrent.duration._
 
 final class Pipeline[F[_]] private[pipeline] (private[pipeline] val node: Pipeline.Node[F]) {
@@ -20,6 +20,12 @@ final class Pipeline[F[_]] private[pipeline] (private[pipeline] val node: Pipeli
     case _ => Pipeline(new Pipeline.Static(fields, node))
   }
 
+  def withMdc(mdc: Mdc): Pipeline[F] =
+    node match {
+      case current: Pipeline.StaticMdc[F] => Pipeline(new Pipeline.StaticMdc(current.mdc ++ mdc, current.child))
+      case _                              => Pipeline(new Pipeline.StaticMdc(mdc, node))
+    }
+
   def withContextSource(source: ContextSource[F]): Pipeline[F] =
     Pipeline(new Pipeline.Source(source, node))
 
@@ -28,6 +34,10 @@ final class Pipeline[F[_]] private[pipeline] (private[pipeline] val node: Pipeli
 
   def filterFields(predicate: Fields => Boolean): Pipeline[F] =
     Pipeline(new Pipeline.FieldsFilter(predicate, node))
+
+  /** Runs after record capture, before backend encoding; channels remain independent. */
+  def filterContext(predicate: LogContext => Boolean): Pipeline[F] =
+    Pipeline(new Pipeline.ContextFilter(predicate, node))
 
   def async(capacity: Int, shutdownTimeout: FiniteDuration = 5.seconds)(implicit
       F: Async[F]
@@ -50,6 +60,7 @@ object Pipeline {
   private[pipeline] final class Concat[F[_]](val left: Node[F], val right: Node[F])  extends Node[F]
   private[pipeline] final class Minimum[F[_]](val level: Level, val child: Node[F])  extends Node[F]
   private[pipeline] final class Static[F[_]](val fields: Fields, val child: Node[F]) extends Node[F]
+  private[pipeline] final class StaticMdc[F[_]](val mdc: Mdc, val child: Node[F])    extends Node[F]
   private[pipeline] final class Source[F[_]](val source: ContextSource[F], val child: Node[F])
       extends Node[F]
   private[pipeline] final class MetadataFilter[F[_]](
@@ -58,6 +69,10 @@ object Pipeline {
   ) extends Node[F]
   private[pipeline] final class FieldsFilter[F[_]](
       val predicate: Fields => Boolean,
+      val child: Node[F]
+  ) extends Node[F]
+  private[pipeline] final class ContextFilter[F[_]](
+      val predicate: LogContext => Boolean,
       val child: Node[F]
   ) extends Node[F]
   private[pipeline] final class AsyncNode[F[_]](
@@ -113,12 +128,15 @@ object Pipeline {
   private final case class Config[F[_]](
       minimum: Level,
       fields: Fields,
+      mdc: Mdc,
       sources: Vector[SourceCapture[F]],
       metadataFilters: Vector[(Level, Option[String]) => Boolean],
-      fieldFilters: Vector[Fields => Boolean]
+      fieldFilters: Vector[Fields => Boolean],
+      contextFilters: Vector[LogContext => Boolean]
   )
   private object Config {
-    def empty[F[_]]: Config[F] = Config(Level.Trace, Fields.empty, Vector.empty, Vector.empty, Vector.empty)
+    def empty[F[_]]: Config[F] =
+      Config(Level.Trace, Fields.empty, Mdc.empty, Vector.empty, Vector.empty, Vector.empty, Vector.empty)
   }
 
   private final case class Output[F[_], B](backend: B, config: Config[F])
@@ -150,12 +168,16 @@ object Pipeline {
           compile(n.child, config.copy(minimum = minimum), offset)
         case n: Static[F] =>
           compile(n.child, config.copy(fields = n.fields ++ config.fields), offset)
+        case n: StaticMdc[F] =>
+          compile(n.child, config.copy(mdc = n.mdc ++ config.mdc), offset)
         case n: Source[F] =>
           compile(n.child, config.copy(sources = config.sources :+ new SourceCapture(n.source)), offset)
         case n: MetadataFilter[F] =>
           compile(n.child, config.copy(metadataFilters = n.predicate +: config.metadataFilters), offset)
         case n: FieldsFilter[F] =>
           compile(n.child, config.copy(fieldFilters = n.predicate +: config.fieldFilters), offset)
+        case n: ContextFilter[F] =>
+          compile(n.child, config.copy(contextFilters = n.predicate +: config.contextFilters), offset)
         case n: AsyncNode[F] =>
           compile(n.child, config, offset).flatMap { child =>
             n.queue.map(queue =>
@@ -177,16 +199,16 @@ object Pipeline {
   }
 
   private trait CapturedOutput[F[_]] {
-    def fields: Fields
-    def accepts: F[Boolean]
+    def data: LogContext
+    def accepts(data: LogContext): F[Boolean]
     def prepare(event: CapturedEvent): F[Delivery[F]]
   }
 
   private def capture[F[_]](backend: BoundBackend[F], meta: EventMeta)(implicit F: Sync[F]): F[CapturedOutput[F]] =
     F.defer(backend.capture(meta)).map { context =>
       new CapturedOutput[F] {
-        val fields: Fields                                = backend.contextFields(context)
-        def accepts: F[Boolean]                           = F.defer(backend.accepts(meta, context))
+        val data: LogContext                              = backend.contextData(context)
+        def accepts(data: LogContext): F[Boolean]         = F.defer(backend.acceptsWithContext(meta, context, data))
         def prepare(event: CapturedEvent): F[Delivery[F]] = backend.prepare(event, context)
       }
     }
@@ -214,14 +236,18 @@ object Pipeline {
           sourced   <- sources.traverse(s => s.source.current.map(s -> _))
           meta = EventMeta(level, scope, eventName, timestamp)
           captures <- live.traverse { case (output, _) => capture(output.backend, meta) }
-          contexts       = sourced.toMap
-          capturedFields = captures.foldLeft(Fields.empty)((fields, captured) => fields ++ captured.fields)
+          contexts     = sourced.toMap
+          capturedData = captures.foldLeft(LogContext.empty)((data, captured) => data ++ captured.data)
           accepted <- live
             .zip(captures)
             .traverse { case ((output, index), captured) =>
-              captured.accepts.map { accepts =>
-                if (accepts) Some((output, index, captured)) else None
-              }
+              val ambient = (Vector(root) ++ output.config.sources.map(s => contexts(s)))
+                .foldLeft(LogContext.empty)(_ ++ _)
+              captured
+                .accepts(LogContext(mdc = output.config.mdc, fields = output.config.fields) ++ ambient ++ capturedData)
+                .map { accepts =>
+                  if (accepts) Some((output, index, captured)) else None
+                }
             }
             .map(_.flatten)
           deliveries <-
@@ -231,11 +257,15 @@ object Pipeline {
                 accepted
                   .traverse { case (output, index, captured) =>
                     val ambient = (Vector(root) ++ output.config.sources.map(s => contexts(s)))
-                      .foldLeft(Fields.empty)(_ ++ _)
-                    val fields = output.config.fields ++ ambient ++ capturedFields ++ payload.fields
-                    if (!output.config.fieldFilters.forall(_(fields))) F.pure(Option.empty[(Int, Delivery[F])])
+                      .foldLeft(LogContext.empty)(_ ++ _)
+                    val fields = output.config.fields ++ ambient.fields ++ capturedData.fields ++ payload.fields
+                    val mdc    = output.config.mdc ++ ambient.mdc ++ capturedData.mdc ++ payload.mdc
+                    if (
+                      !output.config.fieldFilters
+                        .forall(_(fields)) || !output.config.contextFilters.forall(_(LogContext(mdc, fields)))
+                    ) F.pure(Option.empty[(Int, Delivery[F])])
                     else {
-                      val event = CapturedEvent(meta, fields, payload.body, payload.cause)
+                      val event = CapturedEvent(meta, fields, payload.body, payload.cause, mdc)
                       captured.prepare(event).map(delivery => Option(index -> delivery))
                     }
                   }

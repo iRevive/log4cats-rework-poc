@@ -10,5 +10,8 @@ trait RecordWriter {
   def field[A](name: String, value: A)(implicit encoder: Encoder[A]): Unit
   def fields(value: Fields): Unit
 
+  def mdc(name: String, value: String): Unit
+  def mdc(value: Mdc): Unit
+
   def cause(error: Throwable): Unit
 }

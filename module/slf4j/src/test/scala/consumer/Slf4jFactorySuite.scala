@@ -9,7 +9,8 @@ import munit.CatsEffectSuite
 import org.typelevel.log4cats.experimental.{Event, Field, Fields}
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.slf4j.Slf4j
-import org.typelevel.log4cats.experimental.context.ContextSource
+import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.Mdc
 import scala.collection.JavaConverters._
 
 final class Slf4jFactorySuite extends CatsEffectSuite {
@@ -113,9 +114,16 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
   test("context is captured once per execution in the calling fiber and merged with call fields") {
     recording.use { case (native, appender) =>
       for {
-        local <- IOLocal(Fields(Field("request.id", "parent"), Field("attempt", 1)))
+        local <- IOLocal("parent")
         reads <- Ref.of[IO, Int](0)
-        source = ContextSource(reads.update(_ + 1) *> local.get) ++
+        source = ContextSource(
+          reads.update(_ + 1) *> local.get.map(id =>
+            LogContext(
+              mdc = Mdc("request.id" -> id, "attempt" -> "context"),
+              fields = Fields(Field("request.id", id), Field("attempt", 1))
+            )
+          )
+        ) ++
           ContextSource.const[IO](Fields(Field("service", "checkout")))
         factory = Slf4j.factory[IO](native, source)
         logger <- factory.fromName("contextual")
@@ -124,8 +132,8 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         }
         _ <- reads.get.flatMap(n => IO(assertEquals(n, 0)))
         _ <- (
-          local.set(Fields(Field("request.id", "left"), Field("attempt", 1))) *> effect,
-          local.set(Fields(Field("request.id", "right"), Field("attempt", 1))) *> effect
+          local.set("left") *> effect,
+          local.set("right") *> effect
         ).parTupled
         other = factory.getLoggerFromName("other")
         _     <- other.info("parent")
@@ -135,9 +143,9 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         val events = appender.list.asScala.toVector
         assertEquals(events.take(2).map(_.getMDCPropertyMap.get("request.id")).toSet, Set("left", "right"))
         events.take(2).foreach { event =>
-          assertEquals(event.getMDCPropertyMap.get("attempt"), "2")
-          assertEquals(event.getMDCPropertyMap.get("service"), "checkout")
-          assertEquals(event.getMDCPropertyMap.get("event.name"), "checkout.completed")
+          assertEquals(event.getMDCPropertyMap.get("attempt"), "context")
+          assertEquals(event.getMDCPropertyMap.get("service"), null)
+          assertEquals(event.getMDCPropertyMap.get("event.name"), null)
           val fields = event.getKeyValuePairs.asScala.map(kv => kv.key -> kv.value).toMap
           assertEquals(fields("attempt"), java.lang.Long.valueOf(2))
           assertEquals(fields("request.id"), event.getMDCPropertyMap.get("request.id"))
@@ -147,7 +155,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
     }
   }
 
-  test("context and event name are installed for native enablement checks") {
+  test("only explicit MDC is installed for native enablement checks") {
     recording.use { case (native, appender) =>
       native.addTurboFilter(new ch.qos.logback.classic.turbo.TurboFilter {
         override def decide(
@@ -160,16 +168,16 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         ): ch.qos.logback.core.spi.FilterReply =
           if (
             org.slf4j.MDC.get("request.id") == "req-42" &&
-            org.slf4j.MDC.get("event.name") == "checkout.completed"
+            org.slf4j.MDC.get("event.name") == null
           ) ch.qos.logback.core.spi.FilterReply.ACCEPT
           else ch.qos.logback.core.spi.FilterReply.DENY
       })
       var builds  = 0
-      val factory = Slf4j.factory[IO](native, ContextSource.const[IO](Fields(Field("request.id", "req-42"))))
+      val factory = Slf4j.factory[IO](native, ContextSource.const[IO](LogContext(mdc = Mdc("request.id" -> "req-42"))))
       for {
         logger <- factory.fromName("filtered")
         _      <- logger.infoEvent("checkout.completed") { builds += 1; Event.message("accepted") }
-        _      <- logger.info { builds += 1; "rejected" }
+        _      <- Slf4j.factory[IO](native).getLoggerFromName("filtered").info { builds += 1; "rejected" }
       } yield {
         assertEquals(builds, 1)
         assertEquals(appender.list.size(), 1)
@@ -185,7 +193,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         try {
           org.slf4j.MDC.clear()
           org.slf4j.MDC.put("host", "retained")
-          val context = ContextSource.const[SyncIO](Fields(Field("request.id", "req-42")))
+          val context = ContextSource.const[SyncIO](LogContext(mdc = Mdc("request.id" -> "req-42")))
           val factory = Slf4j.factory[SyncIO](native, context)
           val logger  = factory.getLoggerFromName("restoration")
           logger.info("success").unsafeRunSync()
@@ -228,7 +236,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
     recording.use { case (native, appender) =>
       val failure = new RuntimeException("context failure")
       var builds  = 0
-      val factory = Slf4j.factory[IO](native, ContextSource(IO.raiseError[Fields](failure)))
+      val factory = Slf4j.factory[IO](native, ContextSource.fromFields(IO.raiseError[Fields](failure)))
       for {
         logger <- factory.fromName("failed-context")
         effect = logger.info { builds += 1; "unreachable" }

@@ -10,7 +10,7 @@ import org.typelevel.log4cats.experimental.pipeline.Pipeline
 object PreparedDeliveryExample extends IOApp.Simple {
   def run: IO[Unit] = {
     val output  = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](ConsoleBackend.stdout[IO]))
-    val request = ContextSource(IO.pure(Fields(Field("request.id", "req-42"))))
+    val request = ContextSource.fromMdc(IO.pure(Mdc("request.id" -> "req-42")))
 
     Pipeline.runtimeResource(output, request).use { runtime =>
       for {

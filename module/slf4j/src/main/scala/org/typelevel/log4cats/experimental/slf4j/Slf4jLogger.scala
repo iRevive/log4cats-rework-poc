@@ -5,7 +5,7 @@ import cats.syntax.all._
 import org.typelevel.log4cats.experimental.context.ContextSource
 import org.slf4j.{Logger, MDC}
 import org.slf4j.event.{KeyValuePair, Level => JLevel}
-import org.typelevel.log4cats.experimental.{Body, Fields, Level, RecordWriter}
+import org.typelevel.log4cats.experimental.{Body, Fields, Level, Mdc, RecordWriter}
 import org.typelevel.log4cats.experimental.internal.AccumulatingRecordWriter
 import scala.collection.JavaConverters._
 
@@ -13,31 +13,35 @@ private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: Con
     extends org.typelevel.log4cats.experimental.Logger[F] {
   def log(level: Level, eventName: Option[String], write: RecordWriter => Unit): F[Unit] =
     F.defer(context.current).flatMap { ambient =>
-      isEnabled(level, ambient, eventName).flatMap {
+      isEnabled(level, ambient.mdc).flatMap {
         case false => F.unit
         case true =>
           F.delay(AccumulatingRecordWriter.capture(write)).flatMap { record =>
-            prepare(level, eventName, record.body, ambient ++ record.fields, record.cause).flatten
+            prepare(
+              level,
+              eventName,
+              record.body,
+              ambient.fields ++ record.fields,
+              record.cause,
+              ambient.mdc ++ record.mdc
+            ).flatten
           }
       }
     }
 
-  def isEnabled(level: Level, eventName: Option[String] = None): F[Boolean] =
-    isEnabled(level, Fields.empty, eventName)
-
-  private def isEnabled(level: Level, fields: Fields, eventName: Option[String]): F[Boolean] =
-    F.delay(mdcFields(encodeFields(fields, eventName), eventName))
-      .flatMap(fields => F.delay(withMdc(fields)(native.isEnabledForLevel(severity(level)))))
+  def isEnabled(level: Level, mdc: Mdc = Mdc.empty): F[Boolean] =
+    F.delay(withMdc(mdc.values)(native.isEnabledForLevel(severity(level))))
 
   def prepare(
       level: Level,
       eventName: Option[String],
       body: Body,
       fields: Fields,
-      cause: Option[Throwable]
+      cause: Option[Throwable],
+      mdc: Mdc
   ): F[F[Unit]] = F.delay {
     val message = renderBody(body.encode(Slf4jEncoding.native))
-    emitPrepared(level, eventName, message, encodeFields(fields, eventName), cause)
+    emitPrepared(level, eventName, message, encodeFields(fields, eventName), cause, mdc)
   }
 
   private def encodeFields(fields: Fields, eventName: Option[String]): Vector[KeyValuePair] = {
@@ -60,7 +64,8 @@ private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: Con
       eventName: Option[String],
       body: AnyRef,
       fields: AnyRef,
-      cause: Option[Throwable]
+      cause: Option[Throwable],
+      mdc: Mdc
   ): F[Unit] = F.defer {
     val values = fields match {
       case values: java.util.Map[_, _] =>
@@ -70,7 +75,7 @@ private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: Con
       case _ => throw new IllegalArgumentException("encoded SLF4J fields must be an object")
     }
     val selected = if (eventName.isDefined) values.filterNot(_.key == "event.name") else values
-    emitPrepared(level, eventName, renderBody(body), selected, cause)
+    emitPrepared(level, eventName, renderBody(body), selected, cause, mdc)
   }
 
   private def emitPrepared(
@@ -78,11 +83,11 @@ private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: Con
       eventName: Option[String],
       message: String,
       fields: Vector[KeyValuePair],
-      cause: Option[Throwable]
-  ): F[Unit] = {
-    val mdc = mdcFields(fields, eventName)
+      cause: Option[Throwable],
+      mdc: Mdc
+  ): F[Unit] =
     F.delay {
-      withMdc(mdc) {
+      withMdc(mdc.values) {
         // Builders and MDC installation stay within one synchronous emission, including replay.
         val builder = native.atLevel(severity(level)).setMessage(message)
         fields.foreach(field => builder.addKeyValue(field.key, field.value))
@@ -91,12 +96,6 @@ private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: Con
         builder.log()
       }
     }
-  }
-
-  private def mdcFields(fields: Vector[KeyValuePair], eventName: Option[String]): Map[String, String] = {
-    val values = fields.iterator.map(field => field.key -> String.valueOf(field.value)).toMap
-    eventName.fold(values)(name => values.updated("event.name", name))
-  }
 
   private def withMdc[A](fields: Map[String, String])(use: => A): A = {
     val previous = MDC.getCopyOfContextMap

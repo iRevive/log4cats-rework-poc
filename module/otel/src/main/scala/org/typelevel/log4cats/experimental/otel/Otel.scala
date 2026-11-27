@@ -12,14 +12,18 @@ object Otel {
       F: Async[F]
   ): Resource[F, LoggerFactory[F]] = resource(provider, ContextSource.empty[F])
 
-  def resource[F[_], Ctx](provider: LoggerProvider[F, Ctx], context: ContextSource[F])(implicit
+  def resource[F[_], Ctx](
+      provider: LoggerProvider[F, Ctx],
+      context: ContextSource[F],
+      mdcMapping: MdcMapping = MdcMapping.Flat
+  )(implicit
       F: Async[F]
   ): Resource[F, LoggerFactory[F]] = Dispatcher.parallel[F].map { dispatcher =>
     new LoggerFactory[F] {
       def fromName(name: String): F[Logger[F]] =
-        provider.get(Scope(name).name).map(native => new OtelLogger[F, Ctx](native, context)(F, F))
+        provider.get(Scope(name).name).map(native => new OtelLogger[F, Ctx](native, context, mdcMapping)(F, F))
       def getLoggerFromName(name: String): Logger[F] =
-        new OtelLogger[F, Ctx](dispatcher.unsafeRunSync(provider.get(Scope(name).name)), context)(F, F)
+        new OtelLogger[F, Ctx](dispatcher.unsafeRunSync(provider.get(Scope(name).name)), context, mdcMapping)(F, F)
     }
   }
 }

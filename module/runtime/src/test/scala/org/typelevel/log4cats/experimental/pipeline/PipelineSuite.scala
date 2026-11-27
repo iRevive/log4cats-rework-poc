@@ -57,13 +57,13 @@ final class PipelineSuite extends CatsEffectSuite {
       sharedCount <- Ref.of[IO, Int](0)
       leftCount   <- Ref.of[IO, Int](0)
       rightCount  <- Ref.of[IO, Int](0)
-      shared = ContextSource[IO](
+      shared = ContextSource.fromFields[IO](
         sharedCount.update(_ + 1).as(Fields(Field("shared", 1)))
       )
-      leftCtx = ContextSource[IO](
+      leftCtx = ContextSource.fromFields[IO](
         leftCount.update(_ + 1).as(Fields(Field("key", "left-ambient")))
       )
-      rightCtx = ContextSource[IO](
+      rightCtx = ContextSource.fromFields[IO](
         rightCount.update(_ + 1).as(Fields(Field("key", "right-ambient")))
       )
       left = Pipeline
@@ -127,7 +127,7 @@ final class PipelineSuite extends CatsEffectSuite {
       calls = new java.util.concurrent.atomic.AtomicInteger(0)
       left  <- Ref.of[IO, Int](0)
       right <- Ref.of[IO, Int](0)
-      src = ContextSource[IO](captures.update(_ + 1).as(Fields.empty))
+      src = ContextSource.fromFields[IO](captures.update(_ + 1).as(Fields.empty))
       leftPipeline = Pipeline
         .fromBackend[IO](Resource.pure(backend(_ => left.update(_ + 1))))
         .filterMetadata((level, name) => level == Level.Info && name.contains("kept"))
@@ -191,7 +191,7 @@ final class PipelineSuite extends CatsEffectSuite {
       steps :+= label
       true
     }
-    val source = ContextSource(IO { steps :+= "context"; Fields.empty })
+    val source = ContextSource.fromFields(IO { steps :+= "context"; Fields.empty })
     val output = Pipeline
       .fromBackend[IO](Resource.pure(backend(_ => IO.unit)))
       .atLeast(Level.Warn)
@@ -244,7 +244,7 @@ final class PipelineSuite extends CatsEffectSuite {
         def realTime: IO[FiniteDuration]      = clockReads.update(_ + 1).as(123L.nanos)
         def monotonic: IO[FiniteDuration]     = IO.pure(456L.nanos)
       }
-      context = ContextSource[IO](contextReads.update(_ + 1).as(Fields.empty))
+      context = ContextSource.fromFields[IO](contextReads.update(_ + 1).as(Fields.empty))
       output = Pipeline
         .fromBackend[IO](Resource.pure(backend(e => times.update(_ :+ e.meta.timestampNanos))))
         .atLeast(Level.Info)

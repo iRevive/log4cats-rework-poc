@@ -32,7 +32,9 @@ final class InlineFrontendSuite extends CatsEffectSuite {
     }
     def field[A](name: String, value: A)(implicit encoder: Encoder[A]): Unit =
       writes :+= name
-    def fields(value: Fields): Unit = writes :+= "fields"
+    def fields(value: Fields): Unit                               = writes :+= "fields"
+    def mdc(name: String, value: String): Unit                    = writes :+= "mdc:" + name
+    def mdc(value: org.typelevel.log4cats.experimental.Mdc): Unit = ()
     def cause(value: Throwable): Unit = {
       writes :+= "cause"
       causes :+= value

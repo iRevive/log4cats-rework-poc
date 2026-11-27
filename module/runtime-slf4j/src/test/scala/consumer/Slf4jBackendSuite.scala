@@ -7,7 +7,8 @@ import ch.qos.logback.classic.{Level => LogbackLevel, LoggerContext}
 import munit.CatsEffectSuite
 import org.slf4j.Logger
 import org.typelevel.log4cats.experimental.backend.{Backend, EventMeta}
-import org.typelevel.log4cats.experimental.context.ContextSource
+import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.Mdc
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.slf4j.{Slf4jBackend, Slf4jEncoding}
@@ -135,8 +136,13 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
           out.int64(value.toLong)
         }
       }
-      val request = ContextSource(IO.pure(Fields(Field("request.id", "req-42"), Field("attempt", 2))))
-      val output  = plan(context).withFields(Fields(Field("service", "checkout"), Field("attempt", 1)))
+      val request = ContextSource.const[IO](
+        LogContext(
+          mdc = Mdc("request.id" -> "diagnostic", "attempt" -> "ambient"),
+          fields = Fields(Field("request.id", "req-42"), Field("attempt", 2))
+        )
+      )
+      val output = plan(context).withFields(Fields(Field("service", "checkout"), Field("attempt", 1)))
       Pipeline.resource(output, request).use { factory =>
         val logger = factory.getLoggerFromName("structured")
         logger
@@ -144,6 +150,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
             Event
               .message("complete")
               .withFields(Fields(Field("attempt", 0)(discarded), Field("attempt", 3)))
+              .withMdc("attempt", "call")
               .withField("active", true)
               .withField("details", Map("count" -> Long.MaxValue))
               .withField("items", Vector(Some(1), None))
@@ -164,9 +171,9 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
               Vector[AnyRef](java.lang.Long.valueOf(1L), null)
             )
             assertEquals(overwrittenEncodes, 0)
-            assertEquals(event.getMDCPropertyMap.get("request.id"), "req-42")
-            assertEquals(event.getMDCPropertyMap.get("attempt"), "3")
-            assertEquals(event.getMDCPropertyMap.get("event.name"), "checkout.completed")
+            assertEquals(event.getMDCPropertyMap.get("request.id"), "diagnostic")
+            assertEquals(event.getMDCPropertyMap.get("attempt"), "call")
+            assertEquals(event.getMDCPropertyMap.get("event.name"), null)
           }
       }
     }
@@ -181,6 +188,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
           prepared <- runtime.prepare(Scope("snapshot"), Level.Info, Some("snapshot.event")) { writer =>
             writer.body(Map("bytes" -> bytes))
             writer.field("bytes", bytes)
+            writer.mdc("bytes", "diagnostic")
           }
           _ <- IO { bytes(0) = 99 }
           _ <- prepared.deliver.start.flatMap(_.joinWithNever)
@@ -195,8 +203,8 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
             assertEquals(fields.map(_.key), Vector("bytes", "event.name"))
             val encodedBytes = fields.head.value.asInstanceOf[java.util.Map[String, String]]
             assertEquals(encodedBytes.get("$bytes"), "AQID")
-            assertEquals(event.getMDCPropertyMap.get("bytes"), "{$bytes=AQID}")
-            assertEquals(event.getMDCPropertyMap.get("event.name"), "snapshot.event")
+            assertEquals(event.getMDCPropertyMap.get("bytes"), "diagnostic")
+            assertEquals(event.getMDCPropertyMap.get("event.name"), null)
             intercept[UnsupportedOperationException](encodedBytes.put("new", "value"))
           }
         }
@@ -247,5 +255,74 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
     assertEquals(values.get(3), null)
     intercept[IllegalStateException](array.add("later"))
     intercept[UnsupportedOperationException](values.add("later"))
+  }
+
+  test("runtime native enablement sees ambient MDC and preserves typed fields") {
+    recording.use { case (native, appender) =>
+      native.addTurboFilter(new ch.qos.logback.classic.turbo.TurboFilter {
+        override def decide(
+            marker: org.slf4j.Marker,
+            logger: ch.qos.logback.classic.Logger,
+            level: LogbackLevel,
+            format: String,
+            params: Array[AnyRef],
+            error: Throwable
+        ): ch.qos.logback.core.spi.FilterReply =
+          if (org.slf4j.MDC.get("request.id") == "accepted") ch.qos.logback.core.spi.FilterReply.ACCEPT
+          else ch.qos.logback.core.spi.FilterReply.DENY
+      })
+      var builds = 0
+      val source = ContextSource.const[IO](LogContext(mdc = Mdc("request.id" -> "accepted")))
+      Pipeline
+        .resource(plan(native), source)
+        .use { factory =>
+          factory
+            .fromName("mdc-filter")
+            .flatMap(_.infoEvent {
+              builds += 1
+              Event.message("accepted").withField("request.id", 42)
+            })
+        }
+        .map { _ =>
+          assertEquals(builds, 1)
+          val event = appender.events.peek()
+          assertEquals(event.getMDCPropertyMap.get("request.id"), "accepted")
+          assertEquals(event.getKeyValuePairs.asScala.find(_.key == "request.id").get.value, java.lang.Long.valueOf(42))
+        }
+    }
+  }
+
+  test("encoded delivery preserves separate same-key values and explicit event.name MDC") {
+    import org.typelevel.log4cats.experimental.backend.EncodedEvent
+    recording.use { case (native, appender) =>
+      for {
+        backend <- Slf4jBackend.acquire[IO](native)
+        bound   <- backend.bind(Scope("encoded"))
+        meta = EventMeta(Level.Info, Scope("encoded"), Some("native.event"), 1L)
+        captured <- bound.capture(meta)
+        _ <- bound.emit(
+          EncodedEvent[bound.Repr](
+            meta,
+            bound.encoding.text("encoded"), {
+              val fields = bound.encoding.obj()
+              fields.put("id", bound.encoding.int64(42))
+              fields.result()
+            },
+            None,
+            Mdc("id" -> "diagnostic", "event.name" -> "diagnostic.event")
+          ),
+          captured
+        )
+      } yield {
+        val event  = appender.events.peek()
+        val fields = event.getKeyValuePairs.asScala.map(kv => kv.key -> kv.value).toMap
+        assertEquals(fields("id"), java.lang.Long.valueOf(42))
+        assertEquals(fields("event.name"), "native.event")
+        assertEquals(
+          event.getMDCPropertyMap.asScala.toMap,
+          Map("id" -> "diagnostic", "event.name" -> "diagnostic.event")
+        )
+      }
+    }
   }
 }

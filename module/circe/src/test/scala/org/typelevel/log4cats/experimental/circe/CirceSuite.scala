@@ -66,7 +66,7 @@ class CirceSuite extends CatsEffectSuite {
       jsonRecords  <- Ref.of[IO, Vector[EncodedEvent[Json]]](Vector.empty)
       valueRecords <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
       captures     <- Ref.of[IO, Int](0)
-      source = ContextSource(
+      source = ContextSource.fromFields(
         captures
           .update(_ + 1)
           .as(

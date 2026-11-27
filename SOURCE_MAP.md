@@ -9,7 +9,7 @@ uses the optional runtime to send records to SLF4J and OTel with different level
 
 | Module | Responsibility |
 | --- | --- |
-| `core` | Logger/factory API, events, field sources, encoding, reference values, and internal record capture. Uses Cats and cats-mtl; cats-effect is a test dependency only. |
+| `core` | Logger/factory API, events, MDC and structured field sources, encoding, reference values, and internal record capture. Uses Cats and cats-mtl; cats-effect is a test dependency only. |
 | `slf4j` | Direct SLF4J factory, encoding, and emission. Depends on core. |
 | `otel` | Direct otel4s factory, encoding, telemetry context capture, and emission. Depends on core. |
 | `runtime` | Pipelines, backend contracts, context scoping helpers, queues, prepared delivery, and console output. Depends on core. |
@@ -65,20 +65,21 @@ native handle. `fromName` / `fromClass` perform lookup in `F`; `getLoggerFromNam
 [Slf4jLogger](module/slf4j/src/main/scala/org/typelevel/log4cats/experimental/slf4j/Slf4jLogger.scala)
 runs these steps for each logging execution:
 
-1. Read context fields in the calling fiber.
-2. Encode them and install their MDC strings for the native level check.
-3. If enabled, invoke the writer once and merge context fields with call fields.
-4. Encode the record and emit through a fresh SLF4J builder with the merged MDC.
+1. Read diagnostic and structured context in the calling fiber.
+2. Install diagnostic MDC for the native level check.
+3. If enabled, invoke the writer once and merge each channel with its call values.
+4. Encode the structured record and emit through a fresh SLF4J builder with the captured MDC.
 
-Disabled calls still read and encode context; they skip the writer and call-field encoding.
-Enabled calls can encode context fields twice, for the check and for emission. Call fields override
-context fields. Event-name metadata overrides a field named `event.name`.
+Disabled calls still read context; they skip the writer and structured encoding. MDC already holds
+strings. Call values override context values independently in each channel. Same-key MDC and
+structured values coexist. Event-name metadata overrides an `event.name` structured field and is
+emitted only as a key-value pair; explicit MDC `event.name` remains independent.
 
-Fields are emitted as typed key-value pairs and mirrored into MDC with `String.valueOf` (`null`
-becomes `"null"`). Native checks and emission each save, replace, and restore thread MDC in a
-`finally` block. Existing thread entries are hidden during those actions. Both actions run in
-`F.delay`, without a blocking-pool boundary, so providers and appenders run on the calling thread.
-SLF4J supplies the timestamp; this path reads no clock.
+Structured fields go only to native key-value pairs, and diagnostic values go only to native MDC.
+Native checks and emission save, replace, and restore thread MDC in a `finally` block. Existing
+thread entries are hidden during those actions. Both actions run in `F.delay`, without a blocking-pool
+boundary, so providers and appenders run on the calling thread. SLF4J supplies the timestamp; this
+path reads no clock.
 
 ## Direct OTel logging
 
@@ -92,26 +93,30 @@ runs these steps for each logging execution:
 
 1. Sample event time and capture native telemetry context.
 2. Check native enablement using that context, severity, and event name.
-3. If enabled, read the optional field source and invoke the writer once.
-4. Merge source fields with call fields, encode, and emit using the captured telemetry context.
+3. If enabled, read the optional two-channel source and invoke the writer once.
+4. Merge source values with call values within each channel, encode, and emit using the captured telemetry context.
 
-Call fields override source fields. Observation time is sampled during emission. A cause supplies
+OTel merges MDC strings and structured fields into attributes at its adapter boundary. Structured
+fields win collisions. `MdcMapping.Flat` is the default; `MdcMapping.Prefixed("mdc.")` prefixes
+diagnostic keys literally. Explicit structured keys also win prefix collisions. Native telemetry
+context remains separate. Call values override source values within each channel. Observation time is sampled during emission. A cause supplies
 `exception.type`, `exception.message`, and `exception.stacktrace`, overriding fields with those
 names. Event names use native OTel event-name metadata.
 
 ## Context sources and scoping
 
-`ContextSource(effect)` wraps an effect that reads `Fields`. `const(fields)` supplies fixed fields,
-`empty[F]` supplies none, and `fromAsk(ask)` adapts `Ask[F, Fields]`.
-Combining sources with `a ++ b` reads left to right, with later fields winning on duplicate names.
-A failed read stops later reads. `map` transforms fields on each read.
+`ContextSource(effect)` reads `F[LogContext]`, with independent `mdc: Mdc` and `fields: Fields`
+channels. `fromFields(effect)` and `fromMdc(effect)` adapt existing readers. `const` accepts either
+`LogContext` or `Fields`, and `empty[F]` supplies neither. `fromAsk` adapts `Ask[F, Fields]`;
+`fromContextAsk` adapts `Ask[F, LogContext]`. Combining sources with `a ++ b` reads left to right,
+with later values winning independently in each channel. A failed read stops later reads.
+`map` transforms the two-channel context on each read.
 
-Sources only read fields. Applications own the carriers they read, such as an `IOLocal` or an
-MTL environment. SLF4J does not extract telemetry fields automatically.
-For scoping, runtime provides `LoggingContext.withFields` for `Local[F, Fields]`, or
-`ScopedFields.scope` for an `IOLocal[Fields]`. Connect these to a logger with
-`ContextSource.fromAsk(local)` or `ScopedFields.contextSource(scoped)`. These sources work with
-the direct factories as well as pipelines, though the scoping helpers depend on runtime.
+Applications own the carriers read by sources, such as an `IOLocal` or MTL environment. SLF4J does
+not extract telemetry fields automatically. Runtime provides `LoggingContext.withContext` /
+`withMdc` for `Local[F, LogContext]`, and `ScopedContext` for fiber-local two-channel scopes.
+`ScopedContext.source` connects the scoped values to direct factories or pipelines. The field-only
+`LoggingContext.withFields`, `ScopedFields`, and their source adapters remain available.
 `Logger` has no context scoping operation.
 
 ## Optional runtime: follow one log call
@@ -135,11 +140,11 @@ Each logging execution follows this sequence, stopping if a step fails:
 
 ```text
 minimum-level and metadata filters
-  → timestamp, root/source fields, and typed backend context capture
-  → merge projected backend fields in output order
+  → timestamp, root/source MDC and structured fields, and typed backend context capture
+  → merge projected backend enrichment in output order
   → backend acceptance checks
   → writer callback once, if any backend accepts
-  → for each accepted output: merge fields, apply field filters, prepare if kept
+  → for each accepted output: merge both channels, apply field/context filters, prepare if kept
   → deliver in pipeline order, directly or through queues
 ```
 
@@ -147,7 +152,7 @@ If all outputs fail the minimum-level or metadata filters, the runtime reads no 
 and skips the callback. Field filters run after the callback because they need its fields.
 
 `AccumulatingRecordWriter.capture` creates `RecordData`. `CapturedEvent` adds metadata and merged
-fields for one output. Neither `CapturedEvent` nor `EncodedEvent` holds native context.
+MDC/structured fields for one output. Neither `CapturedEvent` nor `EncodedEvent` holds native context.
 `BoundBackend.Context` is an associated type: `capture` returns it, and `accepts` and `prepare`
 consume it. Stateless backends use `Unit`; OTel uses its native `Ctx`.
 `Pipeline.CapturedOutput` retains the backend and its captured state together without casts.
@@ -165,21 +170,23 @@ Native builders are created afresh; OTel observation time is sampled again on ea
 
 ## Runtime fields and context
 
-Fields merge in this order, with later values winning:
+MDC and structured fields merge independently in this order, with later values winning within
+each channel. Same-key values across channels coexist. `filterFields` sees only structured fields;
+`filterContext` sees both channels after call capture:
 
-1. Static defaults from `Pipeline.withFields`.
+1. Static defaults from `Pipeline.withFields` and `withMdc`.
 2. Root context, then sources attached along the output's branch from outer to inner.
-3. Fields projected from captured backend context, in output order.
-4. Fields written by the call.
+3. Enrichment projected from captured backend context, in output order.
+4. Values written by the call.
 
-Outer static defaults override inner defaults; repeated `withFields` calls use the later values.
+Outer static defaults override inner defaults; repeated `withFields` / `withMdc` calls use the later values.
 A source attached above `a ++ b` is read once if either branch survives the initial filters.
 Attaching the same source object separately to each branch reads it twice if both survive.
-Source fields stay on their branches.
+Source enrichment stays on its branch.
 
 Every output surviving the initial filters captures its backend context before any native
-acceptance check, provided earlier captures succeed. Projected fields from all those outputs are
-shared, including fields from outputs that later reject the record. The native states remain
+acceptance check, provided earlier captures succeed. `contextData` projections (by default wrapping the field-only `contextFields` hook) from all those
+outputs are shared, including enrichment from outputs that later reject the record. The native states remain
 with their own backends through preparation, queues, and replay.
 
 `OtelBackend.resource(provider, fields: Ctx => Fields)` projects fields from OTel's captured context.
@@ -196,9 +203,11 @@ contexts.
 | Circe | [CirceBackend](module/circe/src/main/scala/org/typelevel/log4cats/experimental/circe/CirceBackend.scala), [JsonEncoding](module/circe/src/main/scala/org/typelevel/log4cats/experimental/circe/JsonEncoding.scala) | Direct interpretation into Json and an application-supplied effectful sink. |
 | Console | [ConsoleBackend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/console/ConsoleBackend.scala), [ConsoleRenderer](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/console/ConsoleRenderer.scala) | Reference output using the [Value](module/core/src/main/scala/org/typelevel/log4cats/experimental/value/Value.scala) representation. |
 
-The runtime's SLF4J acceptance check sees level and event-name metadata, but no source or call
-fields. Effective fields reach MDC on delivery. Use the direct factory's context reader when
-MDC-dependent enablement needs source fields.
+The runtime's early SLF4J acceptance check receives effective static and ambient MDC through
+`BoundBackend.acceptsWithContext`, matching direct contextual acceptance. Per-call MDC is not
+available until the writer runs; filters requiring it cannot participate in this early gate.
+Structured fields never become MDC implicitly. Console renders separate `mdc` and `fields`
+objects; Circe and custom sinks receive both channels in `EncodedEvent`.
 
 ## Preparation, failure, and ownership
 

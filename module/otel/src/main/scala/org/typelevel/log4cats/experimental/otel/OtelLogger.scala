@@ -3,14 +3,18 @@ package org.typelevel.log4cats.experimental.otel
 import cats.effect.{Clock, Sync}
 import cats.syntax.all._
 import org.typelevel.log4cats.experimental.context.ContextSource
-import org.typelevel.log4cats.experimental.{Body, Fields, Level, RecordWriter}
+import org.typelevel.log4cats.experimental.{Body, Fields, Level, Mdc, RecordWriter}
 import org.typelevel.log4cats.experimental.encoding.FieldSink
 import org.typelevel.log4cats.experimental.internal.AccumulatingRecordWriter
 import org.typelevel.otel4s.logs.{Logger, Severity}
 import org.typelevel.otel4s.{AnyValue, Attribute, AttributeKey}
 import scala.concurrent.duration.FiniteDuration
 
-private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx], context: ContextSource[F])(implicit
+private[experimental] final class OtelLogger[F[_], Ctx](
+    native: Logger[F, Ctx],
+    context: ContextSource[F],
+    mdcMapping: MdcMapping = MdcMapping.Flat
+)(implicit
     F: Sync[F],
     clock: Clock[F]
 ) extends org.typelevel.log4cats.experimental.Logger[F] {
@@ -29,9 +33,10 @@ private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx], 
                 eventName,
                 timestamp.toNanos,
                 record.body,
-                ambient ++ record.fields,
+                ambient.fields ++ record.fields,
                 record.cause,
-                ctx
+                ctx,
+                ambient.mdc ++ record.mdc
               ).flatten
             }
           }
@@ -50,11 +55,13 @@ private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx], 
       body: Body,
       fields: Fields,
       cause: Option[Throwable],
-      ctx: Ctx
+      ctx: Ctx,
+      mdc: Mdc
   ): F[F[Unit]] = F.delay {
     val encodedBody = body.encode(AnyValueEncoding.anyValue)
     val attributes  = Vector.newBuilder[Attribute[_]]
-    val selected    = if (cause.isDefined) fields.filterNames(name => !reserved(name)) else fields
+    val merged      = mdcMapping.fields(mdc) ++ fields
+    val selected    = if (cause.isDefined) merged.filterNames(name => !reserved(name)) else merged
     selected.writeTo(
       AnyValueEncoding.anyValue,
       new FieldSink[AnyValue] {
@@ -72,7 +79,8 @@ private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx], 
       body: AnyValue,
       fields: AnyValue,
       cause: Option[Throwable],
-      ctx: Ctx
+      ctx: Ctx,
+      mdc: Mdc
   ): F[Unit] = F.defer {
     val attributes = fields match {
       case values: AnyValue.MapValue =>
@@ -82,7 +90,19 @@ private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx], 
         }
       case _ => throw new IllegalStateException("encoded OTel fields are not an object")
     }
-    emitPrepared(level, eventName, timestampNanos, body, attributes ++ cause.toVector.flatMap(exceptionAttributes), ctx)
+    val keys = attributes.map(_.key.name).toSet
+    val diagnostic = mdc.values.toVector.collect {
+      case (name, value) if !keys(mdcMapping.key(name)) && (cause.isEmpty || !reserved(mdcMapping.key(name))) =>
+        AttributeKey.anyValue(mdcMapping.key(name))(AnyValue.string(value)): Attribute[_]
+    }
+    emitPrepared(
+      level,
+      eventName,
+      timestampNanos,
+      body,
+      diagnostic ++ attributes ++ cause.toVector.flatMap(exceptionAttributes),
+      ctx
+    )
   }
 
   private def emitPrepared(

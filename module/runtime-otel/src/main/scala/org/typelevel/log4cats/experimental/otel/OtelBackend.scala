@@ -21,20 +21,30 @@ object OtelBackend {
   def resource[F[_], Ctx](provider: LoggerProvider[F, Ctx])(implicit F: Async[F]): Resource[F, Backend[F]] =
     resourceWithClock(provider, F)
 
-  def resource[F[_], Ctx](provider: LoggerProvider[F, Ctx], fields: Ctx => Fields)(implicit
+  def resource[F[_], Ctx](
+      provider: LoggerProvider[F, Ctx],
+      fields: Ctx => Fields,
+      mdcMapping: MdcMapping = MdcMapping.Flat
+  )(implicit
       F: Async[F]
-  ): Resource[F, Backend[F]] = resourceWithClock(provider, F, fields)
+  ): Resource[F, Backend[F]] = resourceWithClock(provider, F, fields, mdcMapping)
+
+  def resource[F[_], Ctx](provider: LoggerProvider[F, Ctx], mdcMapping: MdcMapping)(implicit
+      F: Async[F]
+  ): Resource[F, Backend[F]] =
+    resourceWithClock(provider, F, mdcMapping = mdcMapping)
 
   private[otel] def resourceWithClock[F[_], Ctx](
       provider: LoggerProvider[F, Ctx],
       clock: Clock[F],
-      fields: Ctx => Fields = (_: Ctx) => Fields.empty
+      fields: Ctx => Fields = (_: Ctx) => Fields.empty,
+      mdcMapping: MdcMapping = MdcMapping.Flat
   )(implicit F: Async[F]): Resource[F, Backend[F]] = Dispatcher.parallel[F].map { dispatcher =>
     new Backend[F] {
       def bind(scope: Scope): F[BoundBackend[F]]    = provider.get(scope.name).map(bound)
       def bindUnsafe(scope: Scope): BoundBackend[F] = bound(dispatcher.unsafeRunSync(provider.get(scope.name)))
       private def bound(native: Logger[F, Ctx]): BoundBackend[F] = {
-        val logger = new OtelLogger[F, Ctx](native, ContextSource.empty[F])(F, clock)
+        val logger = new OtelLogger[F, Ctx](native, ContextSource.empty[F], mdcMapping)(F, clock)
         new BoundBackend[F] {
           type Repr    = AnyValue
           type Context = Ctx
@@ -54,7 +64,8 @@ object OtelBackend {
                 event.body,
                 event.fields,
                 event.cause,
-                context
+                context,
+                event.mdc
               )
             )(Delivery(_))
           def emit(event: EncodedEvent[AnyValue], context: Ctx): F[Unit] =
@@ -65,7 +76,8 @@ object OtelBackend {
               event.body,
               event.fields,
               event.cause,
-              context
+              context,
+              event.mdc
             )
         }
       }
