@@ -34,7 +34,7 @@ final class PipelineSuite extends CatsEffectSuite {
         .atLeast(Level.Debug)
       writes = new java.util.concurrent.atomic.AtomicInteger(0)
       _ <- factoryResource(left ++ right).use { factory =>
-        val logger = factory.fromNameUnsafe("fanout")
+        val logger = factory.getLoggerFromName("fanout")
         logger.log(
           Level.Info,
           None,
@@ -79,7 +79,7 @@ final class PipelineSuite extends CatsEffectSuite {
         .withFields(Fields(Field("root", true)))
         .withFields(Fields(Field("root", false)))
       callWins <- factoryResource(pipeline).use { factory =>
-        val logger = factory.fromNameUnsafe("fields")
+        val logger = factory.getLoggerFromName("fields")
         for {
           _     <- logger.log(Level.Info, None, w => w.field("key", "call"))
           first <- (leftFields.get, rightFields.get).tupled
@@ -138,7 +138,7 @@ final class PipelineSuite extends CatsEffectSuite {
         .filterMetadata((level, name) => level == Level.Info && name.contains("kept"))
         .filterFields(_.values.exists(_.name == "drop"))
       afterCoarse <- factoryResource(leftPipeline ++ rightPipeline).use { factory =>
-        val logger = factory.fromNameUnsafe("filters")
+        val logger = factory.getLoggerFromName("filters")
         for {
           _      <- logger.log(Level.Debug, Some("kept"), _ => { calls.incrementAndGet(); () })
           before <- captures.get
@@ -170,7 +170,7 @@ final class PipelineSuite extends CatsEffectSuite {
       emissions <- Ref.of[IO, Int](0)
       output = Pipeline.fromBackend[IO](Resource.pure(backend(_ => emissions.update(_ + 1))))
       result <- factoryResource(output ++ output).use { factory =>
-        val logger = factory.fromNameUnsafe("encoding")
+        val logger = factory.getLoggerFromName("encoding")
         logger.log(Level.Info, None, w => w.body("encoded")(broken))
       }.attempt
       delivered <- emissions.get
@@ -203,7 +203,7 @@ final class PipelineSuite extends CatsEffectSuite {
       .filterMetadata(metadata("outer metadata"))
       .filterFields(fields("outer fields"))
     Pipeline.resource(output).use { factory =>
-      val logger = factory.fromNameUnsafe("compiled-filters")
+      val logger = factory.getLoggerFromName("compiled-filters")
       logger.info("rejected") *> IO(assertEquals(steps, Vector.empty[String])) *>
         logger.log(Level.Warn, None, writer => { steps :+= "writer"; writer.body("accepted") }) *>
         IO(
@@ -223,7 +223,7 @@ final class PipelineSuite extends CatsEffectSuite {
       fanout      = (1 until 128).foldLeft(destination)((plan, _) => plan ++ destination)
       configured  = (0 until 10000).foldLeft(fanout)((plan, _) => plan.atLeast(Level.Info))
       _ <- Pipeline.runtimeResource(configured).use { runtime =>
-        val logger = runtime.fromNameUnsafe("deep")
+        val logger = runtime.getLoggerFromName("deep")
         logger.log(Level.Info, None, writer => { writes.incrementAndGet(); writer.body("accepted") }) *> runtime.flush
       }
       count <- events.get
@@ -250,7 +250,7 @@ final class PipelineSuite extends CatsEffectSuite {
         .atLeast(Level.Info)
       resource = Pipeline.resource(output, context)(Sync[IO], suppliedClock)
       _ <- resource.use { factory =>
-        val logger = factory.fromNameUnsafe("clock")
+        val logger = factory.getLoggerFromName("clock")
         logger.debug("disabled") *> (clockReads.get, contextReads.get).tupled.flatMap { before =>
           IO(assertEquals(before, (0, 0))) *> logger.info("accepted")
         }

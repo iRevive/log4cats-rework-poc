@@ -75,7 +75,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
       events <- Ref.of[IO, Int](0)
       backend = ValueBackend[IO](_ => events.update(_ + 1), IO.pure(()), (_, _) => IO.pure(true))
       result <- Pipeline.runtimeResource(output(backend)).use { runtime =>
-        val logger = runtime.fromNameUnsafe("callback-failure")
+        val logger = runtime.getLoggerFromName("callback-failure")
         val effect = logger.log(Level.Info, None, _ => throw callbackFailure)
         effect.attempt
       }
@@ -83,7 +83,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
         def current: IO[Fields] = throw contextFailure
       }
       contextResult <- Pipeline.runtimeResource(output(backend), failingSource).use { runtime =>
-        val logger = runtime.fromNameUnsafe("context-failure")
+        val logger = runtime.getLoggerFromName("context-failure")
         logger.info("unreachable").attempt
       }
       count <- events.get
@@ -123,7 +123,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
       source = ContextSource(steps.update(_ :+ "ambient").as(Fields(Field("capture", "ambient"))))
       _ <- Pipeline.runtimeResource(output(Backend.constant(first)) ++ output(Backend.constant(second)), source).use {
         runtime =>
-          runtime.fromNameUnsafe("captures").log(Level.Warn, Some("captured.event"), _.body("ok"))
+          runtime.getLoggerFromName("captures").log(Level.Warn, Some("captured.event"), _.body("ok"))
       }
       recordedSteps <- steps.get
       recorded      <- events.get
@@ -188,7 +188,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
           IO.raiseError(new AssertionError("rejected output emitted"))
       }
       _ <- Pipeline.runtimeResource(output(Backend.constant(rejected))).use { runtime =>
-        val logger = runtime.fromNameUnsafe("rejected")
+        val logger = runtime.getLoggerFromName("rejected")
         logger.log(Level.Info, None, _ => throw new AssertionError("rejected writer invoked"))
       }
       count <- captures.get
@@ -205,7 +205,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
       result <- Pipeline
         .runtimeResource(output(first) ++ output(broken) ++ output(later))
         .use { runtime =>
-          val logger = runtime.fromNameUnsafe("fail-fast")
+          val logger = runtime.getLoggerFromName("fail-fast")
           logger.info("event")
         }
         .attempt
@@ -225,7 +225,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
         (_, _) => IO.pure(true)
       )
       _ <- Pipeline.runtimeResource(output(backend)).use { runtime =>
-        val logger = runtime.fromNameUnsafe("cancel")
+        val logger = runtime.getLoggerFromName("cancel")
         for {
           fiber  <- logger.info("wait").start
           _      <- started.get

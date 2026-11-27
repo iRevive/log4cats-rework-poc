@@ -38,10 +38,10 @@ private[experimental] final class OtelLogger[F[_], Ctx](native: Logger[F, Ctx], 
     } yield ()
   }
 
-  def currentContext: F[Ctx] = F.defer(native.currentContext)
+  def currentContext: F[Ctx] = native.currentContext
 
   def isEnabled(level: Level, eventName: Option[String], ctx: Ctx): F[Boolean] =
-    F.defer(native.meta.isEnabled(ctx, Some(severity(level)), eventName))
+    native.meta.isEnabled(ctx, Some(severity(level)), eventName)
 
   def prepare(
       level: Level,

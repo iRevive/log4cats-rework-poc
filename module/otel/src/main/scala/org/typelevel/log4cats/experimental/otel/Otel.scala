@@ -17,11 +17,9 @@ object Otel {
   ): Resource[F, LoggerFactory[F]] = Dispatcher.parallel[F].map { dispatcher =>
     new LoggerFactory[F] {
       def fromName(name: String): F[Logger[F]] =
-        F.defer(provider.get(Scope(name).name)).map(native => new OtelLogger[F, Ctx](native, context)(F, F))
-      def fromClass(clazz: Class[_]): F[Logger[F]] = F.defer(fromName(clazz.getName))
-      def fromNameUnsafe(name: String): Logger[F] =
+        provider.get(Scope(name).name).map(native => new OtelLogger[F, Ctx](native, context)(F, F))
+      def getLoggerFromName(name: String): Logger[F] =
         new OtelLogger[F, Ctx](dispatcher.unsafeRunSync(provider.get(Scope(name).name)), context)(F, F)
-      def fromClassUnsafe(clazz: Class[_]): Logger[F] = fromNameUnsafe(clazz.getName)
     }
   }
 }

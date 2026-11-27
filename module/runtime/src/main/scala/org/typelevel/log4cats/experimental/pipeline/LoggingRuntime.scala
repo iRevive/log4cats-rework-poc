@@ -13,11 +13,7 @@ final class LoggingRuntime[F[_]] private[pipeline] (
 )(implicit F: Sync[F]) extends LoggerFactory[F] {
   def fromName(name: String): F[Logger[F]] = F.defer(bind(Scope(name))).map(logger)
 
-  def fromClass(clazz: Class[_]): F[Logger[F]] = F.defer(fromName(clazz.getName))
-
-  def fromNameUnsafe(name: String): Logger[F] = logger(bindUnsafe(Scope(name)))
-
-  def fromClassUnsafe(clazz: Class[_]): Logger[F] = fromNameUnsafe(clazz.getName)
+  def getLoggerFromName(name: String): Logger[F] = logger(bindUnsafe(Scope(name)))
 
   def prepare(scope: Scope, level: Level, eventName: Option[String])(
       write: RecordWriter => Unit
