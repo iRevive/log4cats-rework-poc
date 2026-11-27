@@ -1,154 +1,193 @@
 # Source map
 
-Start with [Slf4jExample](module/example/src/main/scala/org/typelevel/log4cats/experimental/Slf4jExample.scala).
-It uses the direct SLF4J factory and has no dependency on the optional runtime.
+Start with [Slf4jExample](module/example/src/main/scala/org/typelevel/log4cats/experimental/Slf4jExample.scala)
+for direct SLF4J logging. It has no runtime dependency.
 [MixedOutputExample](module/runtime-example/src/main/scala/org/typelevel/log4cats/experimental/MixedOutputExample.scala)
-shows the separate runtime experiment: context sources, fan-out, and SLF4J/OTel integration.
+uses the optional runtime to send records to SLF4J and OTel with different level thresholds.
 
 ## Module boundaries
 
 | Module | Responsibility |
 | --- | --- |
-| `core` | Logger/factory API, events, field-only context sources, encoding contracts, reference values, and internal record capture. Depends on Cats and cats-mtl; no production cats-effect dependency, pipeline, or context carrier. |
-| `slf4j` | Direct SLF4J factory and native encoding/emission. Depends on core. |
-| `otel` | Direct OTel factory and native context/record handling. Depends on core. |
-| `runtime` | Optional pipeline, backend contracts, context adapters, queues, prepared delivery, and console output. Depends on core. |
-| `runtime-slf4j` | SLF4J pipeline adapter; depends on runtime and slf4j. |
-| `runtime-otel` | OTel pipeline adapter; depends on runtime and otel. |
-| `circe` | JSON encoding and an application-supplied sink for the optional runtime. |
-| `example`, `runtime-example` | Direct SLF4J usage and advanced runtime examples, respectively. |
+| `core` | Logger/factory API, events, field sources, encoding, reference values, and internal record capture. Uses Cats and cats-mtl; cats-effect is a test dependency only. |
+| `slf4j` | Direct SLF4J factory, encoding, and emission. Depends on core. |
+| `otel` | Direct otel4s factory, encoding, telemetry context capture, and emission. Depends on core. |
+| `runtime` | Pipelines, backend contracts, context scoping helpers, queues, prepared delivery, and console output. Depends on core. |
+| `runtime-slf4j` | SLF4J pipeline adapter. Depends on runtime and slf4j. |
+| `runtime-otel` | OTel pipeline adapter. Depends on runtime and otel. |
+| `circe` | JSON encoding and a runtime backend with an application-supplied sink. Depends on runtime. |
+| `example`, `runtime-example` | Direct SLF4J usage and runtime examples, respectively. |
 
-Packages are rooted at `org.typelevel.log4cats.experimental`. Core owns the root API, `encoding`,
-`value.Value`, `context.ContextSource`, and shared `internal` record capture. Runtime owns `backend`,
-Local/IOLocal helpers in `context`, `pipeline`, `pipeline.internal`, `console`, and
-`value.ValueBackend`. `Body` belongs to the root API.
+All packages start with `org.typelevel.log4cats.experimental`. Core contains the root API (including
+`Body`), `encoding`, `value.Value`, `context.ContextSource`, and `internal` record capture.
+Runtime adds `backend`, context scoping helpers, `pipeline`, `pipeline.internal`, `console`, and
+`value.ValueBackend`.
 
-The direct integrations expose `LoggerFactory`; the runtime adapters expose `Backend` for
-`Pipeline.fromBackend`. Keeping the adapters separate lets direct users avoid the runtime dependency
-while sharing native encoding and emission code. The Scala versions are listed in the README;
-all modules currently target the JVM.
+Direct integrations provide `LoggerFactory`. Runtime adapters reuse their encoding and emission
+code and provide `Backend` values for `Pipeline.fromBackend`. Direct users do not need these adapters
+or runtime. See the [README module table](README.md#modules) for Scala versions; all modules target
+the JVM. Dependencies are set in [build.sbt](build.sbt).
 
 ## Reading order
 
 | Area | Files | What to inspect |
 | --- | --- | --- |
-| Application API | [Logger](module/core/src/main/scala/org/typelevel/log4cats/experimental/Logger.scala), [Event](module/core/src/main/scala/org/typelevel/log4cats/experimental/Event.scala), [RecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/RecordWriter.scala) | The SAM, immutable event descriptions, and the callback that builds a record. |
-| Factories and runtime control | [LoggerFactory](module/core/src/main/scala/org/typelevel/log4cats/experimental/LoggerFactory.scala), [LoggingRuntime](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/LoggingRuntime.scala) | Effectful and direct name/class binding; the optional LoggingRuntime adds flush and prepare, with shared outputs and workers. |
-| Pipeline | [Pipeline](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/Pipeline.scala) | Configuration compiled into outputs and delivery routing; context capture and preparation. |
-| Shared record construction | [AccumulatingRecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/internal/AccumulatingRecordWriter.scala), [Fields](module/core/src/main/scala/org/typelevel/log4cats/experimental/Fields.scala) | Invocation-local accumulation, sealing, and duplicate field resolution. |
-| Encoding | [Encoder](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/Encoder.scala), [ValueEncoding](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/ValueEncoding.scala), [FieldSink](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/FieldSink.scala) | Domain encoders, backend value algebras, and direct top-level field emission. |
-| Backend contract | [Backend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Backend.scala), [BoundBackend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/BoundBackend.scala), [Delivery](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Delivery.scala) | Bind a destination to a name, capture backend-typed state, and retain it in deferred emission. |
-| Context | [ContextSource](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/ContextSource.scala), [LoggingContext](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/LoggingContext.scala), [ScopedFields](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/ScopedFields.scala) | Core source construction/composition and Ask adapter; runtime Local scoping and optional IOLocal helper. |
+| Application API | [Logger](module/core/src/main/scala/org/typelevel/log4cats/experimental/Logger.scala), [Event](module/core/src/main/scala/org/typelevel/log4cats/experimental/Event.scala), [RecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/RecordWriter.scala) | The single abstract logging method, event descriptions, and record construction callback. |
+| Factories and runtime control | [LoggerFactory](module/core/src/main/scala/org/typelevel/log4cats/experimental/LoggerFactory.scala), [LoggingRuntime](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/LoggingRuntime.scala) | Effectful and direct logger lookup; runtime flush and prepare. |
+| Pipeline | [Pipeline](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/Pipeline.scala) | Output configuration, context capture, preparation, and delivery order. |
+| Shared record construction | [AccumulatingRecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/internal/AccumulatingRecordWriter.scala), [Fields](module/core/src/main/scala/org/typelevel/log4cats/experimental/Fields.scala) | One writer per callback, sealing, and duplicate field names. |
+| Encoding | [Encoder](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/Encoder.scala), [ValueEncoding](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/ValueEncoding.scala), [FieldSink](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/FieldSink.scala) | Domain encoders, backend value construction, and top-level field encoding. |
+| Backend contract | [Backend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Backend.scala), [BoundBackend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/BoundBackend.scala), [Delivery](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Delivery.scala) | Bind a logger name, capture typed backend state, and retain it for delivery. |
+| Context | [ContextSource](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/ContextSource.scala), [LoggingContext](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/LoggingContext.scala), [ScopedFields](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/ScopedFields.scala) | Read and combine fields in core; scope fields with Local or IOLocal in runtime. |
 | Async delivery | [AsyncDeliveryQueue](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/internal/AsyncDeliveryQueue.scala) | Bounded admission, worker failure, flush barriers, and shutdown. |
 
-Severity helpers support `info(message)`, `info(message, cause)`, `infoEvent(event)`, and
-`infoEvent(name)(event)` (and the other severities). Messages/events are deferred until the writer
-runs. The cause is strict: it is evaluated once when constructing the logging effect and retained
-across executions, preserving construction-time stack traces. Named helpers also capture the name
-once at effect construction.
+`Logger` has one abstract method, `log(level, eventName, write)`, so it can be implemented with a
+lambda (a single abstract method, or SAM). Helpers such as `info(message)`, `info(message, cause)`,
+`infoEvent(event)`, and `infoEvent(name)(event)` all call it. The other severities have the same helpers.
 
-These helpers delegate to the single abstract `Logger.log` method. Each implementation
-controls filtering and callback execution; a custom SAM implementation supplies its own behavior.
+Message and event expressions run inside the writer callback. Cause arguments and event names are
+evaluated once when the logging effect is constructed. Reusing that effect retains the same cause
+and name. Custom `Logger` implementations control when and how often they invoke the callback;
+the supplied implementations defer it until execution and skip it when disabled.
 
 The [Scala 2 macros](module/core/src/main/scala-2/org/typelevel/log4cats/experimental/LoggerMacro.scala)
 and [Scala 3 inline helpers](module/core/src/main/scala-3/org/typelevel/log4cats/experimental/LoggerMacro.scala)
-expand severity/event helpers to the same `Logger.log` operation. Read these after the logging path.
+implement these helpers. Read them after the logging path.
 
-## Direct native logging
+## Direct SLF4J logging
 
 [Slf4j.factory](module/slf4j/src/main/scala/org/typelevel/log4cats/experimental/slf4j/Slf4j.scala)
-returns `LoggerFactory[F]` directly, using either the default provider or an explicit `ILoggerFactory`.
-It owns no native resources. Each named logger retains its native SLF4J handle. The default-provider and
-explicit-provider overloads accept a core `ContextSource[F]`.
-`ContextSource(effect)` wraps an effectful field reader; `ContextSource.const(fields)` supplies fixed
-fields, and `ContextSource.empty[F]` supplies none. `ContextSource.fromAsk(ask)` adapts an
-`Ask[F, Fields]` without allocating a carrier. `ContextSource(a) ++ ContextSource(b)` reads left
-to right; later fields win. Failures stop later reads. `map` transforms the fields on each read.
-[Slf4jLogger](module/slf4j/src/main/scala/org/typelevel/log4cats/experimental/slf4j/Slf4jLogger.scala)
-reads context once per execution in the calling fiber, installs contextual MDC for native enablement,
-then captures the writer and merges context fields followed by call fields. Disabled logging skips
-the callback and call-field encoding; context is still read and encoded for the enablement check.
-Contextual fields can be encoded for both enablement and emission.
+returns `LoggerFactory[F]`. Overloads accept the default or an explicit `ILoggerFactory`, with an
+optional `ContextSource[F]`. The factory owns no native resources. Each returned logger retains its
+native handle. `fromName` / `fromClass` perform lookup in `F`; `getLoggerFromName` /
+`getLoggerFromClass` perform lookup directly.
 
-Effective fields retain typed SLF4J key-value representations and are also mirrored into MDC using
-their native values' string representations (`null` becomes `"null"`). Event-name metadata wins over
-an `event.name` field. Both native enablement and emission run in synchronous `F.delay` actions that save, replace,
-and restore MDC in `finally`. They introduce no blocking-pool boundary; the configured SLF4J
-provider and appenders execute on the calling thread. Unrelated thread MDC is excluded during
-those actions.
-SLF4J owns the timestamp; this path reads no clock and uses no routing structure.
+[Slf4jLogger](module/slf4j/src/main/scala/org/typelevel/log4cats/experimental/slf4j/Slf4jLogger.scala)
+runs these steps for each logging execution:
+
+1. Read context fields in the calling fiber.
+2. Encode them and install their MDC strings for the native level check.
+3. If enabled, invoke the writer once and merge context fields with call fields.
+4. Encode the record and emit through a fresh SLF4J builder with the merged MDC.
+
+Disabled calls still read and encode context; they skip the writer and call-field encoding.
+Enabled calls can encode context fields twice, for the check and for emission. Call fields override
+context fields. Event-name metadata overrides a field named `event.name`.
+
+Fields are emitted as typed key-value pairs and mirrored into MDC with `String.valueOf` (`null`
+becomes `"null"`). Native checks and emission each save, replace, and restore thread MDC in a
+`finally` block. Existing thread entries are hidden during those actions. Both actions run in
+`F.delay`, without a blocking-pool boundary, so providers and appenders run on the calling thread.
+SLF4J supplies the timestamp; this path reads no clock.
+
+## Direct OTel logging
 
 [Otel.resource](module/otel/src/main/scala/org/typelevel/log4cats/experimental/otel/Otel.scala)
-returns `Resource[F, LoggerFactory[F]]`. It owns the Dispatcher used for unsafe lookup and borrows
-the supplied provider. Safe lookup stays in the caller effect.
-[OtelLogger](module/otel/src/main/scala/org/typelevel/log4cats/experimental/otel/OtelLogger.scala)
-captures event time and telemetry context during execution, checks native enablement, then captures,
-encodes, and emits the record. Observation time is sampled on emission.
+returns `Resource[F, LoggerFactory[F]]`. It owns a Dispatcher for direct lookup and leaves the
+provider application-owned. Effectful lookup uses the caller's effect. Direct lookup runs the
+provider effect through `Dispatcher.unsafeRunSync` and can block; prefer `fromName` / `fromClass`.
 
-Both direct implementations defer callbacks until execution and skip them when disabled.
-Neither constructs a pipeline. Their native encoding/emission helpers are also used by the optional
-runtime adapters, so exception handling, structured values, and event names share one implementation.
-SLF4J's context reader can obtain request and telemetry fields from application-owned carriers.
-It does not allocate or mutate an ambient scope, or extract telemetry fields automatically.
-`LoggingContext.withFields` (Local scoping), `ScopedFields` (IOLocal scoping), and pipeline policies
-remain in the optional runtime. The read-only Ask adapter lives on core `ContextSource`.
-`Otel.resource(provider, source)` accepts the same core field source, reading it after native
-enablement and before record construction. Call fields override source fields. Native telemetry
-context is still captured independently by the OTel implementation.
+[OtelLogger](module/otel/src/main/scala/org/typelevel/log4cats/experimental/otel/OtelLogger.scala)
+runs these steps for each logging execution:
+
+1. Sample event time and capture native telemetry context.
+2. Check native enablement using that context, severity, and event name.
+3. If enabled, read the optional field source and invoke the writer once.
+4. Merge source fields with call fields, encode, and emit using the captured telemetry context.
+
+Call fields override source fields. Observation time is sampled during emission. A cause supplies
+`exception.type`, `exception.message`, and `exception.stacktrace`, overriding fields with those
+names. Event names use native OTel event-name metadata.
+
+## Context sources and scoping
+
+`ContextSource(effect)` wraps an effect that reads `Fields`. `const(fields)` supplies fixed fields,
+`empty[F]` supplies none, and `fromAsk(ask)` adapts `Ask[F, Fields]`.
+Combining sources with `a ++ b` reads left to right, with later fields winning on duplicate names.
+A failed read stops later reads. `map` transforms fields on each read.
+
+Sources only read fields. Applications own the carriers they read, such as an `IOLocal` or an
+MTL environment. SLF4J does not extract telemetry fields automatically.
+For scoping, runtime provides `LoggingContext.withFields` for `Local[F, Fields]`, or
+`ScopedFields.scope` for an `IOLocal[Fields]`. Connect these to a logger with
+`ContextSource.fromAsk(local)` or `ScopedFields.contextSource(scoped)`. These sources work with
+the direct factories as well as pipelines, though the scoping helpers depend on runtime.
+`Logger` has no context scoping operation.
 
 ## Optional runtime: follow one log call
 
-`Pipeline.fromBackend` introduces a destination. `Pipeline.resource` exposes a `LoggerFactory`;
-`Pipeline.runtimeResource` exposes `LoggingRuntime`, which implements that factory and adds
-`flush` and `prepare`. Follow resource acquisition (`runtimeResource → compile`), named logger
-construction (`fromName → bind → bound`), then each log execution (`prepare → deliver`).
-`fromName`/`fromClass` return `F[Logger[F]]`; `getLoggerFromName`/`getLoggerFromClass` return
-`Logger[F]` directly, matching log4cats naming. `LoggingRuntime.fromName` invokes effectful backend
-binding; `getLoggerFromName` invokes synchronous binding.
-`Backend` defines safe and unsafe binding explicitly. SLF4J suspends its synchronous lookup;
-OTel composes the provider's effect directly and uses its Dispatcher only for unsafe lookup.
-`BoundBackend` is a separate emission handle with no binding operations. Name-independent outputs
-use `Backend.constant(handle)` to opt into sharing a handle; Value, Console, and Circe constructors
-return those factories. Factory lookups bind rather than caching by name.
-Logging through the returned logger reuses those handles. Naming does not acquire another output
-or worker. `LoggingRuntime.prepare`, unlike a retained logger, binds on each execution of its effect.
+`Pipeline.fromBackend` adds an output; `++` combines outputs. `Pipeline.resource` provides a
+`LoggerFactory`. `Pipeline.runtimeResource` provides a `LoggingRuntime`, which implements that
+factory and adds `flush` and `prepare`.
+
+Resource acquisition compiles the pipeline and acquires its outputs and queues. Logger lookup
+binds each backend to a name: `fromName` uses effectful `Backend.bind`, while `getLoggerFromName`
+uses synchronous `bindUnsafe`. The returned logger reuses those bound handles. Lookup does not
+cache loggers by name or acquire another output or worker. `LoggingRuntime.prepare` binds on
+each execution, even when reusing the same preparation effect.
+
+`BoundBackend` handles capture, acceptance, preparation, and emission; it has no lookup methods.
+`Backend.constant(handle)` shares one handle across names. Value, Console, and Circe constructors
+use this approach. SLF4J suspends native lookup in `F.delay`; OTel uses the provider effect for
+`bind` and a Dispatcher for `bindUnsafe`.
+
+Each logging execution follows this sequence, stopping if a step fails:
 
 ```text
-pipeline-provided logger.log(...) creates F[Unit]
-  execution
-    → minimum-level and metadata filters
-    → timestamp, root/source context, and typed backend context capture
-    → project backend context fields in output order
-    → backend acceptance checks
-    → writer callback once, if any backend accepts
-    → effective fields and field filters, per output
-    → preparation of every remaining output
-    → delivery, directly or through configured queues
+minimum-level and metadata filters
+  → timestamp, root/source fields, and typed backend context capture
+  → merge projected backend fields in output order
+  → backend acceptance checks
+  → writer callback once, if any backend accepts
+  → for each accepted output: merge fields, apply field filters, prepare if kept
+  → deliver in pipeline order, directly or through queues
 ```
 
-`AccumulatingRecordWriter.capture` produces `RecordData`; `CapturedEvent` combines that payload with metadata
-and effective fields for each branch. Neither `CapturedEvent` nor `EncodedEvent` contains native context.
-`BoundBackend.Context` is an associated type: `capture` returns that backend's state, and both
-`accepts` and `prepare` consume it. Stateless backends use `Unit`; OTel uses the full native `Ctx`.
-`Pipeline.CapturedOutput` closes over the backend/state pair, preserving its type without casts.
-`BoundBackend.prepare(event, context)` encodes the record and retains state in a `Delivery` closure.
-`LoggingRuntime` then runs the prepared delivery through the compiled routing. The configuration
-compiler accumulates filters, defaults, and source references on outputs. Runtime routing contains
-direct output, sequencing, and queue boundaries.
+If all outputs fail the minimum-level or metadata filters, the runtime reads no clock or context
+and skips the callback. Field filters run after the callback because they need its fields.
+
+`AccumulatingRecordWriter.capture` creates `RecordData`. `CapturedEvent` adds metadata and merged
+fields for one output. Neither `CapturedEvent` nor `EncodedEvent` holds native context.
+`BoundBackend.Context` is an associated type: `capture` returns it, and `accepts` and `prepare`
+consume it. Stateless backends use `Unit`; OTel uses its native `Ctx`.
+`Pipeline.CapturedOutput` retains the backend and its captured state together without casts.
+
+`BoundBackend.prepare` returns a `Delivery` that retains encoded data and backend state.
+The default implementation encodes before returning; SLF4J and OTel override preparation to use
+their native helpers. Custom backends must keep encoding in preparation if they want the same
+failure and replay behavior. The runtime waits for every selected output's preparation before
+starting delivery.
+
 The [prepared example](module/runtime-example/src/main/scala/org/typelevel/log4cats/experimental/PreparedDeliveryExample.scala)
-separates those steps explicitly. Replaying a delivery repeats emission without recapturing or encoding.
+shows preparation and delivery as separate calls. With the supplied backends, replay repeats
+emission without re-reading context, re-running the writer, or re-encoding the payload.
+Native builders are created afresh; OTel observation time is sampled again on each emission.
 
-Context sources are read-only. To scope an effect, use `LoggingContext.withFields` with the same
-`Local` read by `ContextSource.fromAsk`, or `ScopedFields.scope` with its `contextSource` adapter.
-Wire that source into the pipeline. `Pipeline.withFields` supplies static defaults;
-`Logger` currently has no ambient-context scoping operation.
+## Runtime fields and context
 
-An OTel runtime adapter can also project fields from that same native capture:
-`OtelBackend.resource(provider, fields: Ctx => Fields)`. The projection is synchronous and optional;
-its default is empty. Projected fields can enrich sibling outputs while the native state remains
-private to OTel. The runtime performs no native-context merging and uses no Vault attachments.
+Fields merge in this order, with later values winning:
 
-## Optional runtime adapters
+1. Static defaults from `Pipeline.withFields`.
+2. Root context, then sources attached along the output's branch from outer to inner.
+3. Fields projected from captured backend context, in output order.
+4. Fields written by the call.
+
+Outer static defaults override inner defaults; repeated `withFields` calls use the later values.
+A source attached above `a ++ b` is read once if either branch survives the initial filters.
+Attaching the same source object separately to each branch reads it twice if both survive.
+Source fields stay on their branches.
+
+Every output surviving the initial filters captures its backend context before any native
+acceptance check, provided earlier captures succeed. Projected fields from all those outputs are
+shared, including fields from outputs that later reject the record. The native states remain
+with their own backends through preparation, queues, and replay.
+
+`OtelBackend.resource(provider, fields: Ctx => Fields)` projects fields from OTel's captured context.
+The projection is synchronous and defaults to empty. Other outputs see the projected fields,
+while the native context remains private to the OTel output. The runtime does not merge native
+contexts.
+
+## Runtime adapters
 
 | Backend | Files | Integration choices |
 | --- | --- | --- |
@@ -157,46 +196,54 @@ private to OTel. The runtime performs no native-context merging and uses no Vaul
 | Circe | [CirceBackend](module/circe/src/main/scala/org/typelevel/log4cats/experimental/circe/CirceBackend.scala), [JsonEncoding](module/circe/src/main/scala/org/typelevel/log4cats/experimental/circe/JsonEncoding.scala) | Direct interpretation into Json and an application-supplied effectful sink. |
 | Console | [ConsoleBackend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/console/ConsoleBackend.scala), [ConsoleRenderer](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/console/ConsoleRenderer.scala) | Reference output using the [Value](module/core/src/main/scala/org/typelevel/log4cats/experimental/value/Value.scala) representation. |
 
-The runtime's early SLF4J enablement check has level/event-name metadata; effective fields reach MDC
-on delivery. MDC-dependent enablement using ambient fields is supported by the direct factory's
-context reader, not by the runtime's early check.
+The runtime's SLF4J acceptance check sees level and event-name metadata, but no source or call
+fields. Effective fields reach MDC on delivery. Use the direct factory's context reader when
+MDC-dependent enablement needs source fields.
 
-## Runtime contracts worth checking
+## Preparation, failure, and ownership
 
-- **Laziness:** for pipeline-provided loggers, message/event evaluation stays inside the writer
-  callback. Minimum/metadata and native acceptance checks can skip it; field filters require
-  constructing the payload first.
-- **Fields:** static defaults precede ambient source fields, then backend-projected fields, then call fields;
-  later values win.
-  Repeated body/cause writes also use the last value. A writer is sealed after its callback.
-- **Context:** a source attached above fan-out is read once per log occurrence. Attaching the same
-  source object separately to two branches reads it twice when both survive coarse filtering.
-  Branch fields remain isolated.
-  Every output surviving minimum/metadata filters captures before any native acceptance check.
-  Each captured state stays with its own backend and is retained across prepared replay and queues.
-  `contextFields` projections merge in output order across the surviving outputs, including
-  projections from outputs that subsequently reject the record. Projected fields are visible to
-  all selected outputs; opaque native states are never shared between backends.
-- **Preparation:** outputs passing native acceptance and field filters finish encoding before any
-  output emits or queues the record. Field-rejected outputs do not encode.
-  Preparation failure emits nothing. Delivery is sequential and fail-fast; earlier emissions or
-  queue admissions survive a later failure. Fan-out admissions are not transactional.
-- **Values:** encoders run separately for each selected backend.
-  Event descriptions retain domain references until preparation. The supplied encodings snapshot
-  bytes during encoding. Throwable references and captured backend states are not deep copies.
-  Empty/byte/nonfinite encodings are backend policies and are not universally reversible.
-- **Time:** the pipeline currently samples one producer timestamp after coarse filtering. OTel
-  retains it as event time and samples observation time on delivery. The SLF4J fluent adapter cannot
-  override the provider's native timestamp. Timestamp ownership is still a review question.
-- **Async:** queue placement changes delivery topology; see the
-  [async example](module/runtime-example/src/main/scala/org/typelevel/log4cats/experimental/AsyncOutputExample.scala).
-  Admission applies backpressure. Flush is a barrier for prior admitted work, not an exporter flush.
-  Worker failure stops delivery and is exposed by subsequent admission, flush, and resource release.
-  Cancellation racing admission can leave an admitted record. Shutdown drains admitted work before
-  releasing outputs; a timeout cancels the worker, but cannot force uncancelable actions to stop.
-- **Ownership:** each resource acquisition creates an independent runtime. Named loggers share its
-  destinations and workers. Borrowed SLF4J/OTel providers remain application-owned. Unsafe OTel
-  binding may block and should use a blocking boundary when called from an IO program.
+The supplied backends encode each accepted, field-filtered output separately. Field-rejected
+outputs do not encode. A preparation failure prevents delivery to all outputs. Once delivery
+starts, it is sequential and stops on the first failure: earlier emissions or queue admissions
+remain. Admission across multiple queues is not atomic.
+
+Logging errors propagate to the calling effect; there is no built-in recovery policy. Validation
+can also fail during construction, for example for an empty logger name or invalid field name.
+The supplied encodings reject null text and byte arrays; causes must be nonnull.
+
+Events retain domain values by reference until encoding. The supplied encodings snapshot byte
+arrays during encoding, but throwable references and captured backend states are not deep copies.
+A writer uses the last body, cause, or duplicate field value and is sealed after its callback,
+including when the callback fails. Use it only within that callback, synchronously.
+Empty values, bytes, and nonfinite numbers have backend-specific representations; conversion is
+not always reversible.
+
+The runtime samples one producer timestamp after the initial filters. OTel uses it as event time
+and samples observation time on delivery. The SLF4J adapter leaves timestamps to the provider, so
+queued delivery does not preserve the producer timestamp in native SLF4J output.
+
+Each pipeline resource acquisition acquires the configured outputs and creates its queues and workers.
+Named loggers share those outputs and workers.
+Keep factories, loggers, and deliveries within the owning resource lifetime. SLF4J and OTel
+providers remain application-owned. Direct OTel lookup in either factory can block; use an
+`IO.blocking` boundary if it must be called from IO.
+
+## Async delivery
+
+`async(capacity)` adds a bounded queue. `(a ++ b).async(n)` queues the combined delivery;
+`a.async(n) ++ b` queues only `a` and delivers `b` on the caller's path. See
+[PipelineTopologySuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/PipelineTopologySuite.scala)
+for placement tests. [AsyncOutputExample](module/runtime-example/src/main/scala/org/typelevel/log4cats/experimental/AsyncOutputExample.scala)
+shows a single async output and explicit flush.
+
+Admission waits when the queue is full and acknowledges enqueueing, not completed delivery.
+Cancellation racing admission can leave a record queued. `flush` waits for work admitted before
+its barrier; it does not flush an OTel exporter or native appender.
+
+A worker failure stops further delivery. Later admissions, flush, and resource release report the
+failure; pending records are skipped. Normal shutdown closes admission and drains queued work
+before releasing outputs. A shutdown timeout cancels the worker, but cannot force an uncancelable
+backend action to stop.
 
 ## Tests to read
 
@@ -205,19 +252,20 @@ context reader, not by the runtime's early check.
 | Do context sources compose and capture lazily? | [ContextSourceSuite](module/core/src/test/scala/org/typelevel/log4cats/experimental/context/ContextSourceSuite.scala) |
 | Does SLF4J work without the runtime? | [Slf4jFactorySuite](module/slf4j/src/test/scala/consumer/Slf4jFactorySuite.scala) |
 | Does direct OTel lookup/context handling work? | [OtelFactorySuite](module/otel/src/test/scala/org/typelevel/log4cats/experimental/otel/OtelFactorySuite.scala) |
-| Is the SAM/frontend usable and lazy? | [InlineFrontendSuite](module/core/src/test/scala/consumer/InlineFrontendSuite.scala) |
-| Are factories/bound handles distinct, and captured context types isolated? | [BackendBindingSuite](module/runtime/src/test/scala/consumer/BackendBindingSuite.scala) |
+| Do helpers work from consumer code and defer messages/events? | [InlineFrontendSuite](module/core/src/test/scala/consumer/InlineFrontendSuite.scala) |
+| Are factories and bound handles separate, with typed context? | [BackendBindingSuite](module/runtime/src/test/scala/consumer/BackendBindingSuite.scala) |
 | Do names share acquired resources? | [LoggerFactorySuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/LoggerFactorySuite.scala) |
 | How do filters and context compose? | [PipelineSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/PipelineSuite.scala), [ContextSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/context/ContextSuite.scala) |
 | What survives preparation and replay? | [DeliveryContractSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/DeliveryContractSuite.scala), [BackendPreparationSuite](module/runtime/src/test/scala/consumer/BackendPreparationSuite.scala) |
-| What does queue placement/failure mean? | [PipelineTopologySuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/PipelineTopologySuite.scala), [AsyncDeliveryQueueSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/internal/AsyncDeliveryQueueSuite.scala) |
+| How do queue placement and failure affect delivery? | [PipelineTopologySuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/PipelineTopologySuite.scala), [AsyncDeliveryQueueSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/internal/AsyncDeliveryQueueSuite.scala) |
 | Do native adapters preserve the record? | [Slf4jBackendSuite](module/runtime-slf4j/src/test/scala/consumer/Slf4jBackendSuite.scala), [OtelPipelineSuite](module/runtime-otel/src/test/scala/org/typelevel/log4cats/experimental/otel/OtelPipelineSuite.scala), [CirceSuite](module/circe/src/test/scala/org/typelevel/log4cats/experimental/circe/CirceSuite.scala) |
 
 ## Questions for review
 
-1. Does the SAM/writer/encoding model provide a useful foundation for library and application code?
-2. Does the core/native integration/runtime split keep ordinary usage small?
-3. Which semantics should be fixed by the runtime, and which should be configurable composition:
-   timestamp capture, context merging, preparation, and async delivery?
-4. Are the macro/inline helpers justified? Are shared record capture and typed backend state the right boundaries for native implementations?
-5. Should ambient context scoping remain an explicit capability, or be exposed through a logger facade?
+1. Is the single logging method, writer callback, and encoding model useful for libraries and applications?
+2. Does separating core, direct integrations, and runtime keep ordinary usage small?
+3. Which runtime rules should be configurable: timestamps, context precedence, preparation failures,
+   or async delivery?
+4. Are the macro/inline helpers worth keeping? Are shared record capture and typed backend state
+   useful boundaries?
+5. Should context scoping remain a separate capability, or be available through a logger?
