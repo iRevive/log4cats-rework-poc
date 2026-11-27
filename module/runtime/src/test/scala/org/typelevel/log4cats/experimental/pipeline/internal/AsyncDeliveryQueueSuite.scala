@@ -29,24 +29,25 @@ final class AsyncDeliveryQueueSuite extends CatsEffectSuite {
     } yield assertEquals(all, Vector(1, 2, 3))
   }
 
-  test("worker failure is visible through flush, submissions and resource release") {
-    val failure = new RuntimeException("destination failed")
+  test("a failed delivery preserves queued work, accepts later submissions and releases successfully") {
+    val failure = new RuntimeException("destination failed") { override def printStackTrace(): Unit = () }
     for {
-      result <- AsyncDeliveryQueue
-        .resource[IO](1)
-        .use { queue =>
-          for {
-            _      <- queue.submit(IO.raiseError[Unit](failure))
-            flush  <- queue.flush.attempt
-            submit <- queue.submit(IO.unit).attempt
-            _ <- IO {
-              assertEquals(flush, Left(failure): Either[Throwable, Unit])
-              assertEquals(submit, Left(failure): Either[Throwable, Unit])
-            }
-          } yield ()
-        }
-        .attempt
-    } yield assertEquals(result, Left(failure): Either[Throwable, Unit])
+      entered <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      events  <- Ref.of[IO, Vector[Int]](Vector.empty)
+      _ <- AsyncDeliveryQueue.resource[IO](2).use { queue =>
+        for {
+          _ <- queue.submit(entered.complete(()).void *> release.get *> IO.raiseError[Unit](failure))
+          _ <- entered.get
+          _ <- queue.submit(events.update(_ :+ 2))
+          _ <- release.complete(())
+          _ <- queue.flush
+          _ <- queue.submit(events.update(_ :+ 3))
+          _ <- queue.flush
+        } yield ()
+      }
+      all <- events.get
+    } yield assertEquals(all, Vector(2, 3))
   }
 
   test("cancellation of a blocked producer releases admission for later submissions") {

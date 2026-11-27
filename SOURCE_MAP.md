@@ -136,7 +136,8 @@ each execution, even when reusing the same preparation effect.
 use this approach. SLF4J suspends native lookup in `F.delay`; OTel uses the provider effect for
 `bind` and a Dispatcher for `bindUnsafe`.
 
-Each logging execution follows this sequence, stopping if a step fails:
+Each logging execution follows this sequence. Capture and preparation failures stop it; delivery
+errors follow the output's configured policy:
 
 ```text
 minimum-level and metadata filters
@@ -212,13 +213,30 @@ objects; Circe and custom sinks receive both channels in `EncodedEvent`.
 ## Preparation, failure, and ownership
 
 The supplied backends encode each accepted, field-filtered output separately. Field-rejected
-outputs do not encode. A preparation failure prevents delivery to all outputs. Once delivery
-starts, it is sequential and stops on the first failure: earlier emissions or queue admissions
-remain. Admission across multiple queues is not atomic.
+outputs do not encode. A preparation failure prevents delivery to all outputs.
 
-Logging errors propagate to the calling effect; there is no built-in recovery policy. Validation
-can also fail during construction, for example for an empty logger name or invalid field name.
-The supplied encodings reject null text and byte arrays; causes must be nonnull.
+[DeliveryFailurePolicy](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/DeliveryFailurePolicy.scala)
+applies around each prepared output's delivery, before outputs are combined or queued. The default
+reports through the `Console[F]` supplied to runtime resource construction, to stderr, and continues
+without retrying. The runtime retains its `Sync[F]` requirement. Later sibling
+outputs run even when an earlier output fails; later records remain deliverable. Direct SLF4J and
+OTel factories are unchanged.
+
+`Pipeline.withDeliveryFailurePolicy(DeliveryFailurePolicy.reportAndContinue(report))` supplies an
+effectful error reporter. Its `DeliveryFailure` carries level, scope, event name, and original error.
+A failed reporter falls back to Console diagnostics once; a failed fallback is swallowed. Reporting
+runs within delivery, so slow reporters can delay the queue or synchronous caller. Reporters must
+not log through the same failing pipeline. Cancellation is not recovered.
+
+All delivery policies report and continue. A failed output does not skip later siblings or discard
+queued records. Earlier emissions and admissions remain; admission across queues is not atomic.
+The policy nearest an output overrides enclosing defaults; consecutive calls use the last policy.
+
+Capture, native enablement, callback, encoding, and filter errors remain strict, as do acquisition
+and queue lifecycle errors. Validation can also fail during construction, for example for an empty
+logger name or invalid field name. The supplied encodings reject null text and byte arrays;
+causes must be nonnull. This change does not introduce null compatibility or catch errors while
+strict logging arguments are evaluated.
 
 Events retain domain values by reference until encoding. The supplied encodings snapshot byte
 arrays during encoding, but throwable references and captured backend states are not deep copies.
@@ -249,8 +267,13 @@ Admission waits when the queue is full and acknowledges enqueueing, not complete
 Cancellation racing admission can leave a record queued. `flush` waits for work admitted before
 its barrier; it does not flush an OTel exporter or native appender.
 
-A worker failure stops further delivery. Later admissions, flush, and resource release report the
-failure; pending records are skipped. Normal shutdown closes admission and drains queued work
+Recoverable sink errors are handled per output and do not fail the worker. A barrier waits for
+delivery and its error reporting; recovered errors do not cause `flush` or release to fail. Error
+history is reported through the configured handler rather than retained by the queue.
+
+The queue also reports and recovers ordinary errors escaping a queued action, then processes its
+remaining work. Only worker termination (including cancellation) or shutdown closes admission.
+Unexpected worker termination is reported by later admissions, flush, and resource release. Normal shutdown closes admission and drains queued work
 before releasing outputs. A shutdown timeout cancels the worker, but cannot force an uncancelable
 backend action to stop.
 
@@ -266,6 +289,7 @@ backend action to stop.
 | Do names share acquired resources? | [LoggerFactorySuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/LoggerFactorySuite.scala) |
 | How do filters and context compose? | [PipelineSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/PipelineSuite.scala), [ContextSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/context/ContextSuite.scala) |
 | What survives preparation and replay? | [DeliveryContractSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/DeliveryContractSuite.scala), [BackendPreparationSuite](module/runtime/src/test/scala/consumer/BackendPreparationSuite.scala) |
+| Do error policies isolate siblings and preserve cancellation? | [DeliveryFailurePolicySuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/DeliveryFailurePolicySuite.scala), [DeliveryContractSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/DeliveryContractSuite.scala) |
 | How do queue placement and failure affect delivery? | [PipelineTopologySuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/PipelineTopologySuite.scala), [AsyncDeliveryQueueSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/pipeline/internal/AsyncDeliveryQueueSuite.scala) |
 | Do native adapters preserve the record? | [Slf4jBackendSuite](module/runtime-slf4j/src/test/scala/consumer/Slf4jBackendSuite.scala), [OtelPipelineSuite](module/runtime-otel/src/test/scala/org/typelevel/log4cats/experimental/otel/OtelPipelineSuite.scala), [CirceSuite](module/circe/src/test/scala/org/typelevel/log4cats/experimental/circe/CirceSuite.scala) |
 

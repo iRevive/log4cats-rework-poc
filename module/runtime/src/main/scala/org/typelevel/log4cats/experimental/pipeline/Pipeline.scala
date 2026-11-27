@@ -2,6 +2,7 @@ package org.typelevel.log4cats.experimental.pipeline
 
 import cats.effect.{Async, Clock, Resource, Sync}
 import cats.syntax.all._
+import cats.effect.std.Console
 import org.typelevel.log4cats.experimental.backend.{Backend, BoundBackend, CapturedEvent, Delivery, EventMeta}
 import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
 import org.typelevel.log4cats.experimental.pipeline.internal.{AsyncDeliveryQueue, RecordPreparer}
@@ -39,6 +40,13 @@ final class Pipeline[F[_]] private[pipeline] (private[pipeline] val node: Pipeli
   def filterContext(predicate: LogContext => Boolean): Pipeline[F] =
     Pipeline(new Pipeline.ContextFilter(predicate, node))
 
+  /** Branch policies override enclosing policies; delivery recovery does not cover preparation. */
+  def withDeliveryFailurePolicy(policy: DeliveryFailurePolicy[F]): Pipeline[F] =
+    node match {
+      case current: Pipeline.FailurePolicy[F] => Pipeline(new Pipeline.FailurePolicy(policy, current.child))
+      case _                                  => Pipeline(new Pipeline.FailurePolicy(policy, node))
+    }
+
   def async(capacity: Int, shutdownTimeout: FiniteDuration = 5.seconds)(implicit
       F: Async[F]
   ): Pipeline[F] = {
@@ -47,7 +55,7 @@ final class Pipeline[F[_]] private[pipeline] (private[pipeline] val node: Pipeli
     Pipeline(
       new Pipeline.AsyncNode(
         node,
-        AsyncDeliveryQueue.resource[F](capacity, shutdownTimeout)
+        console => AsyncDeliveryQueue.resource[F](capacity, shutdownTimeout)(F, console)
       )
     )
   }
@@ -75,9 +83,13 @@ object Pipeline {
       val predicate: LogContext => Boolean,
       val child: Node[F]
   ) extends Node[F]
+  private[pipeline] final class FailurePolicy[F[_]](
+      val policy: DeliveryFailurePolicy[F],
+      val child: Node[F]
+  ) extends Node[F]
   private[pipeline] final class AsyncNode[F[_]](
       val child: Node[F],
-      val queue: Resource[F, AsyncDeliveryQueue[F]]
+      val queue: Console[F] => Resource[F, AsyncDeliveryQueue[F]]
   ) extends Node[F]
 
   def fromBackend[F[_]](acquire: => Resource[F, Backend[F]]): Pipeline[F] =
@@ -87,18 +99,21 @@ object Pipeline {
 
   def resource[F[_]](pipeline: Pipeline[F], rootContext: ContextSource[F])(implicit
       F: Sync[F],
-      clock: Clock[F]
+      clock: Clock[F],
+      console: Console[F]
   ): Resource[F, LoggerFactory[F]] =
-    runtimeResource(pipeline, rootContext)(F, clock).map(runtime => runtime: LoggerFactory[F])
+    runtimeResource(pipeline, rootContext)(F, clock, console).map(runtime => runtime: LoggerFactory[F])
 
   def resource[F[_]](pipeline: Pipeline[F])(implicit
       F: Sync[F],
-      clock: Clock[F]
-  ): Resource[F, LoggerFactory[F]] = resource(pipeline, ContextSource.empty[F])(F, clock)
+      clock: Clock[F],
+      console: Console[F]
+  ): Resource[F, LoggerFactory[F]] = resource(pipeline, ContextSource.empty[F])(F, clock, console)
 
   def runtimeResource[F[_]](pipeline: Pipeline[F], rootContext: ContextSource[F])(implicit
       F: Sync[F],
-      clock: Clock[F]
+      clock: Clock[F],
+      console: Console[F]
   ): Resource[F, LoggingRuntime[F]] =
     compile(pipeline.node, Config.empty[F], 0).map { compiled =>
       new LoggingRuntime[F](
@@ -120,8 +135,9 @@ object Pipeline {
 
   def runtimeResource[F[_]](pipeline: Pipeline[F])(implicit
       F: Sync[F],
-      clock: Clock[F]
-  ): Resource[F, LoggingRuntime[F]] = runtimeResource(pipeline, ContextSource.empty[F])(F, clock)
+      clock: Clock[F],
+      console: Console[F]
+  ): Resource[F, LoggingRuntime[F]] = runtimeResource(pipeline, ContextSource.empty[F])(F, clock, console)
 
   private final class SourceCapture[F[_]](val source: ContextSource[F])
 
@@ -132,11 +148,21 @@ object Pipeline {
       sources: Vector[SourceCapture[F]],
       metadataFilters: Vector[(Level, Option[String]) => Boolean],
       fieldFilters: Vector[Fields => Boolean],
-      contextFilters: Vector[LogContext => Boolean]
+      contextFilters: Vector[LogContext => Boolean],
+      failurePolicy: DeliveryFailurePolicy[F]
   )
   private object Config {
     def empty[F[_]]: Config[F] =
-      Config(Level.Trace, Fields.empty, Mdc.empty, Vector.empty, Vector.empty, Vector.empty, Vector.empty)
+      Config(
+        Level.Trace,
+        Fields.empty,
+        Mdc.empty,
+        Vector.empty,
+        Vector.empty,
+        Vector.empty,
+        Vector.empty,
+        DeliveryFailurePolicy.stderr[F]
+      )
   }
 
   private final case class Output[F[_], B](backend: B, config: Config[F])
@@ -149,7 +175,8 @@ object Pipeline {
       extends Routing[F]
 
   private def compile[F[_]](node: Node[F], config: Config[F], offset: Int)(implicit
-      F: Sync[F]
+      F: Sync[F],
+      console: Console[F]
   ): Resource[F, Compiled[F]] =
     Resource.eval(F.unit).flatMap { _ =>
       node match {
@@ -178,16 +205,19 @@ object Pipeline {
           compile(n.child, config.copy(fieldFilters = n.predicate +: config.fieldFilters), offset)
         case n: ContextFilter[F] =>
           compile(n.child, config.copy(contextFilters = n.predicate +: config.contextFilters), offset)
+        case n: FailurePolicy[F] =>
+          compile(n.child, config.copy(failurePolicy = n.policy), offset)
         case n: AsyncNode[F] =>
           compile(n.child, config, offset).flatMap { child =>
-            n.queue.map(queue =>
-              child.copy(routing = Queued(child.routing, queue, offset until offset + child.outputs.size))
-            )
+            n.queue(console)
+              .map(queue =>
+                child.copy(routing = Queued(child.routing, queue, offset until offset + child.outputs.size))
+              )
           }
       }
     }
 
-  private def bound[F[_]: Sync](
+  private def bound[F[_]: Sync: Console](
       routing: Routing[F],
       outputs: Vector[Output[F, BoundBackend[F]]],
       rootContext: ContextSource[F],
@@ -221,7 +251,7 @@ object Pipeline {
       scope: Scope,
       level: Level,
       eventName: Option[String]
-  )(write: RecordWriter => Unit)(implicit F: Sync[F]): F[Delivery[F]] =
+  )(write: RecordWriter => Unit)(implicit F: Sync[F], console: Console[F]): F[Delivery[F]] =
     F.delay {
       outputs.zipWithIndex.filter { case (output, _) =>
         output.config.minimum.rank <= level.rank && output.config.metadataFilters.forall(_(level, eventName))
@@ -266,7 +296,12 @@ object Pipeline {
                     ) F.pure(Option.empty[(Int, Delivery[F])])
                     else {
                       val event = CapturedEvent(meta, fields, payload.body, payload.cause, mdc)
-                      captured.prepare(event).map(delivery => Option(index -> delivery))
+                      captured.prepare(event).map { delivery =>
+                        val protectedDelivery = Delivery(
+                          output.config.failurePolicy.deliver(delivery.deliver, meta.level, meta.scope, meta.eventName)
+                        )
+                        Option(index -> protectedDelivery)
+                      }
                     }
                   }
                   .map(_.flatten.toMap)
