@@ -5,12 +5,11 @@ import cats.syntax.all._
 import io.circe.Json
 import munit.CatsEffectSuite
 import org.typelevel.log4cats.experimental.backend.{Backend, BoundBackend, EncodedEvent, EventMeta}
-import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
+import org.typelevel.log4cats.experimental.context.ContextSource
 import org.typelevel.log4cats.experimental.encoding.ValueEncoding
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.value.Value
 import org.typelevel.log4cats.experimental.{Event, Field, Fields, Level, Scope}
-import org.typelevel.vault.Vault
 
 class CirceSuite extends CatsEffectSuite {
   private val out = JsonEncoding.json
@@ -71,9 +70,7 @@ class CirceSuite extends CatsEffectSuite {
         captures
           .update(_ + 1)
           .as(
-            LogContext(
-              Fields(Field("request", "req-1"), Field("winner", "ambient"))
-            )
+            Fields(Field("request", "req-1"), Field("winner", "ambient"))
           )
       )
       json = Pipeline
@@ -84,11 +81,12 @@ class CirceSuite extends CatsEffectSuite {
         )
         .async(2)
       value = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](Backend.constant(new BoundBackend[IO] {
-        type Repr = Value
+        type Context = Unit
+        type Repr    = Value
         val encoding                                                  = ValueEncoding.value
-        def capture(meta: EventMeta): IO[Vault]                       = IO.pure(Vault.empty)
-        def accepts(meta: EventMeta, attachments: Vault): IO[Boolean] = IO.pure(true)
-        def emit(event: EncodedEvent[Value]): IO[Unit]                = valueRecords.update(_ :+ event)
+        def capture(meta: EventMeta): IO[Unit]                        = IO.pure(())
+        def accepts(meta: EventMeta, context: Unit): IO[Boolean]      = IO.pure(true)
+        def emit(event: EncodedEvent[Value], context: Unit): IO[Unit] = valueRecords.update(_ :+ event)
       })))
       plan = (json ++ value).withFields(Fields(Field("winner", "static")))
       _ <- Pipeline.runtimeResource(plan, source).use { runtime =>

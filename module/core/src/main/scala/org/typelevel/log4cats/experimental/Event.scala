@@ -1,6 +1,6 @@
 package org.typelevel.log4cats.experimental
 
-import org.typelevel.log4cats.experimental.backend.Body
+import org.typelevel.log4cats.experimental.Body
 import org.typelevel.log4cats.experimental.encoding.Encoder
 
 /** Immutable event description. Domain values are retained by reference until interpretation. */
