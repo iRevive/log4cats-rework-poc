@@ -30,7 +30,7 @@ final class OtelFactorySuite extends CatsEffectSuite {
             safeLogger   <- safe
             afterSafe    <- lookups.get
             _            <- IO(assertEquals(afterSafe, Vector("caller")))
-            unsafeLogger <- IO.blocking(factory.fromNameUnsafe("unsafe.component"))
+            unsafeLogger <- IO.blocking(factory.getLoggerFromName("unsafe.component"))
             afterUnsafe  <- lookups.get
             _            <- IO(assertEquals(afterUnsafe.size, 2))
             _            <- safeLogger.info("one") *> safeLogger.info("two") *> unsafeLogger.info("three")
@@ -49,8 +49,8 @@ final class OtelFactorySuite extends CatsEffectSuite {
       for {
         allocated <- Otel.resource(kit.loggerProvider).allocated
         (factory, close) = allocated
-        _       <- IO.blocking(factory.fromNameUnsafe("before-close")).guarantee(close)
-        failed  <- IO.blocking(factory.fromNameUnsafe("after-close")).attempt
+        _       <- IO.blocking(factory.getLoggerFromName("before-close")).guarantee(close)
+        failed  <- IO.blocking(factory.getLoggerFromName("after-close")).attempt
         _       <- Otel.resource(kit.loggerProvider).use(_.fromName("still-open").flatMap(_.info("open")))
         records <- kit.finishedLogs
       } yield {

@@ -3,11 +3,11 @@ package org.typelevel.log4cats.experimental
 trait LoggerFactory[F[_]] {
   def fromName(name: String): F[Logger[F]]
 
-  def fromClass(clazz: Class[_]): F[Logger[F]]
+  def fromClass(clazz: Class[_]): F[Logger[F]] = fromName(clazz.getName)
 
-  def fromNameUnsafe(name: String): Logger[F]
+  def getLoggerFromName(name: String): Logger[F]
 
-  def fromClassUnsafe(clazz: Class[_]): Logger[F]
+  def getLoggerFromClass(clazz: Class[_]): Logger[F] = getLoggerFromName(clazz.getName)
 }
 
 object LoggerFactory {

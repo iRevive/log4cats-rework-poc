@@ -10,7 +10,7 @@ object Slf4jExample extends IOApp.Simple {
     }
   }
 
-  val factory = Slf4j.factoryUnsafe[IO]
+  val factory = Slf4j.factory[IO]
 
   def run: IO[Unit] =
     for {

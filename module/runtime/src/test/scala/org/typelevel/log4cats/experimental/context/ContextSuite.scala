@@ -85,7 +85,7 @@ final class ContextSuite extends CatsEffectSuite {
       _ <- Pipeline
         .resource(plan, source)
         .use { factory =>
-          val logger = factory.fromNameUnsafe("reader")
+          val logger = factory.getLoggerFromName("reader")
           LoggingContext.withFields[Reader, Unit](Fields(Field("scope", "nested"))) {
             logger.infoEvent(Event.message("event").withField("call", true))
           }

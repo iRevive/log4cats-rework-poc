@@ -90,7 +90,7 @@ class CirceSuite extends CatsEffectSuite {
       })))
       plan = (json ++ value).withFields(Fields(Field("winner", "static")))
       _ <- Pipeline.runtimeResource(plan, source).use { runtime =>
-        val logger = runtime.fromNameUnsafe("json-test")
+        val logger = runtime.getLoggerFromName("json-test")
         val bytes  = Array[Byte](1, 2, 3)
         for {
           prepared <- runtime.prepare(Scope("json-test"), Level.Info, Some("json.event")) { writer =>
@@ -133,7 +133,7 @@ class CirceSuite extends CatsEffectSuite {
     Pipeline
       .runtimeResource(plan)
       .use { runtime =>
-        val logger = runtime.fromNameUnsafe("disabled")
+        val logger = runtime.getLoggerFromName("disabled")
         logger.infoEvent { built += 1; Event.body("unused") }
       }
       .map(_ => assertEquals(built, 0))

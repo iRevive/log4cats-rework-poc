@@ -33,7 +33,7 @@ all modules currently target the JVM.
 | Area | Files | What to inspect |
 | --- | --- | --- |
 | Application API | [Logger](module/core/src/main/scala/org/typelevel/log4cats/experimental/Logger.scala), [Event](module/core/src/main/scala/org/typelevel/log4cats/experimental/Event.scala), [RecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/RecordWriter.scala) | The SAM, immutable event descriptions, and the callback that builds a record. |
-| Factories and runtime control | [LoggerFactory](module/core/src/main/scala/org/typelevel/log4cats/experimental/LoggerFactory.scala), [LoggingRuntime](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/LoggingRuntime.scala) | Effectful and unsafe name/class binding; the optional LoggingRuntime adds flush and prepare, with shared outputs and workers. |
+| Factories and runtime control | [LoggerFactory](module/core/src/main/scala/org/typelevel/log4cats/experimental/LoggerFactory.scala), [LoggingRuntime](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/LoggingRuntime.scala) | Effectful and direct name/class binding; the optional LoggingRuntime adds flush and prepare, with shared outputs and workers. |
 | Pipeline | [Pipeline](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/Pipeline.scala) | Configuration compiled into outputs and delivery routing; context capture and preparation. |
 | Shared record construction | [AccumulatingRecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/internal/AccumulatingRecordWriter.scala), [Fields](module/core/src/main/scala/org/typelevel/log4cats/experimental/Fields.scala) | Invocation-local accumulation, sealing, and duplicate field resolution. |
 | Encoding | [Encoder](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/Encoder.scala), [ValueEncoding](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/ValueEncoding.scala), [FieldSink](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/FieldSink.scala) | Domain encoders, backend value algebras, and direct top-level field emission. |
@@ -57,9 +57,9 @@ expand severity/event helpers to the same `Logger.log` operation. Read these aft
 ## Direct native logging
 
 [Slf4j.factory](module/slf4j/src/main/scala/org/typelevel/log4cats/experimental/slf4j/Slf4j.scala)
-returns `F[LoggerFactory[F]]`, using either the default provider or an explicit `ILoggerFactory`.
+returns `LoggerFactory[F]` directly, using either the default provider or an explicit `ILoggerFactory`.
 It owns no native resources. Each named logger retains its native SLF4J handle. The default-provider and
-explicit-provider overloads accept a core `ContextSource[F]`; `factoryUnsafe` also accepts a source.
+explicit-provider overloads accept a core `ContextSource[F]`.
 `ContextSource(effect)` wraps an effectful field reader; `ContextSource.const(fields)` supplies fixed
 fields, and `ContextSource.empty[F]` supplies none. `ContextSource.fromAsk(ask)` adapts an
 `Ask[F, Fields]` without allocating a carrier. `ContextSource(a) ++ ContextSource(b)` reads left
@@ -68,7 +68,7 @@ to right; later fields win. Failures stop later reads. `map` transforms the fiel
 reads context once per execution in the calling fiber, installs contextual MDC for native enablement,
 then captures the writer and merges context fields followed by call fields. Disabled logging skips
 the callback and call-field encoding; context is still read and encoded for the enablement check.
-Encoders must remain pure: contextual fields can be encoded for both enablement and emission.
+Contextual fields can be encoded for both enablement and emission.
 
 Effective fields retain typed SLF4J key-value representations and are also mirrored into MDC using
 their native values' string representations (`null` becomes `"null"`). Event-name metadata wins over
@@ -102,7 +102,9 @@ context is still captured independently by the OTel implementation.
 `Pipeline.runtimeResource` exposes `LoggingRuntime`, which implements that factory and adds
 `flush` and `prepare`. Follow resource acquisition (`runtimeResource → compile`), named logger
 construction (`fromName → bind → bound`), then each log execution (`prepare → deliver`).
-`LoggingRuntime.fromName` invokes safe backend binding; `fromNameUnsafe` invokes synchronous binding.
+`fromName`/`fromClass` return `F[Logger[F]]`; `getLoggerFromName`/`getLoggerFromClass` return
+`Logger[F]` directly, matching log4cats naming. `LoggingRuntime.fromName` invokes effectful backend
+binding; `getLoggerFromName` invokes synchronous binding.
 `Backend` defines safe and unsafe binding explicitly. SLF4J suspends its synchronous lookup;
 OTel composes the provider's effect directly and uses its Dispatcher only for unsafe lookup.
 `BoundBackend` is a separate emission handle with no binding operations. Name-independent outputs
@@ -142,7 +144,7 @@ Wire that source into the pipeline. `Pipeline.withFields` supplies static defaul
 `Logger` currently has no ambient-context scoping operation.
 
 An OTel runtime adapter can also project fields from that same native capture:
-`OtelBackend.resource(provider, fields: Ctx => Fields)`. The projection is pure and optional;
+`OtelBackend.resource(provider, fields: Ctx => Fields)`. The projection is synchronous and optional;
 its default is empty. Projected fields can enrich sibling outputs while the native state remains
 private to OTel. The runtime performs no native-context merging and uses no Vault attachments.
 
@@ -172,14 +174,14 @@ context reader, not by the runtime's early check.
   Branch fields remain isolated.
   Every output surviving minimum/metadata filters captures before any native acceptance check.
   Each captured state stays with its own backend and is retained across prepared replay and queues.
-  Pure `contextFields` projections merge in output order across the surviving outputs, including
+  `contextFields` projections merge in output order across the surviving outputs, including
   projections from outputs that subsequently reject the record. Projected fields are visible to
   all selected outputs; opaque native states are never shared between backends.
 - **Preparation:** outputs passing native acceptance and field filters finish encoding before any
   output emits or queues the record. Field-rejected outputs do not encode.
   Preparation failure emits nothing. Delivery is sequential and fail-fast; earlier emissions or
   queue admissions survive a later failure. Fan-out admissions are not transactional.
-- **Values:** encoders are expected to be pure; they run separately for each selected backend.
+- **Values:** encoders run separately for each selected backend.
   Event descriptions retain domain references until preparation. The supplied encodings snapshot
   bytes during encoding. Throwable references and captured backend states are not deep copies.
   Empty/byte/nonfinite encodings are backend policies and are not universally reversible.
