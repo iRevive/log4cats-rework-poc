@@ -75,7 +75,7 @@ final class OtelFactorySuite extends CatsEffectSuite {
     val cause        = new IllegalStateException("failed")
     var builds       = 0
     var contextReads = 0
-    val source = ContextSource(IO {
+    val source = ContextSource.fromFields(IO {
       contextReads += 1
       Fields(Field("service", "checkout"), Field("request.id", -1))
     })
@@ -111,6 +111,38 @@ final class OtelFactorySuite extends CatsEffectSuite {
           assert(records.head.getTimestampEpochNanos > 0L)
           assert(records.head.getObservedTimestampEpochNanos >= records.head.getTimestampEpochNanos)
         }
+      }
+    }
+  }
+
+  test("direct OTel maps MDC strings only at the backend, with flat and prefixed collisions") {
+    import org.typelevel.log4cats.experimental.{Event, Mdc}
+    import org.typelevel.log4cats.experimental.context.LogContext
+    import io.opentelemetry.api.common.AttributeKey
+    LogsTestkit.inMemory[IO]().use { kit =>
+      val source = ContextSource.const[IO](LogContext(Mdc("id" -> "ambient", "only" -> "42")))
+      val event = Event
+        .message("channels")
+        .withMdc("id", "call")
+        .withMdc("exception.message", "fake")
+        .withField("id", 42)
+        .withCause(new IllegalStateException("real"))
+      for {
+        _ <- Otel.resource(kit.loggerProvider, source).use(_.fromName("flat").flatMap(_.infoEvent(event)))
+        _ <- Otel
+          .resource(kit.loggerProvider, source, MdcMapping.Prefixed("mdc."))
+          .use(_.fromName("prefixed").flatMap(_.infoEvent(event)))
+        records <- kit.finishedLogs
+      } yield {
+        val flat     = records.head.getAttributes
+        val prefixed = records.last.getAttributes
+        assertEquals(flat.get(AttributeKey.longKey("id")), java.lang.Long.valueOf(42))
+        assertEquals(flat.get(AttributeKey.stringKey("only")), "42")
+        assertEquals(flat.get(AttributeKey.stringKey("exception.message")), "real")
+        assertEquals(prefixed.get(AttributeKey.longKey("id")), java.lang.Long.valueOf(42))
+        assertEquals(prefixed.get(AttributeKey.stringKey("mdc.id")), "call")
+        assertEquals(prefixed.get(AttributeKey.stringKey("mdc.only")), "42")
+        assertEquals(prefixed.get(AttributeKey.stringKey("mdc.exception.message")), "fake")
       }
     }
   }

@@ -35,28 +35,53 @@ Both direct integrations and the runtime use these lookup methods:
 | `fromName` / `fromClass` | `F[Logger[F]]` |
 | `getLoggerFromName` / `getLoggerFromClass` | `Logger[F]` |
 
-### Context fields
+### Diagnostic context and structured fields
 
-Pass a `ContextSource[F]` to read fields when logging. For example,
-`Slf4j.factory[IO](ContextSource(local.get))` reads an application-owned `IOLocal[Fields]`.
-Sources can wrap an effect (`ContextSource(effect)`), fixed fields (`ContextSource.const(fields)`),
-or a Cats MTL reader (`ContextSource.fromAsk(ask)`).
+For ambient enrichment, pass a core `ContextSource[F]`. Diagnostic context and structured fields
+are separate channels:
 
-Combine sources with `requestSource ++ telemetrySource`. They read left to right, and later fields
-win on duplicate names. Direct SLF4J logging reads the combined source once per execution, even if
-the level is disabled. Per-call fields override source fields.
+```scala
+val source = ContextSource.const[IO](LogContext(
+  mdc = Mdc("request.id" -> "req-42"),
+  fields = Fields(Field("service", "checkout"))
+))
+val factory = Slf4j.factory[IO](source)
+// Event.message("done").withMdc("request.id", "req-43").withField("attempt", 2)
+```
 
-SLF4J emits fields as typed key-value pairs and also copies their string representations into MDC,
-so Logback patterns such as `%X{request.id}` can display them. During native checks and emission,
-this MDC replaces the thread's existing entries; the previous MDC is restored afterward.
+`Mdc` holds nonnull strings and maps only to native MDC (e.g. Logback `%X{request.id}`).
+`Fields` retains typed, potentially nested values and maps only to native key-value pairs.
+The same key can exist in both channels; no automatic mirroring occurs. Event-name metadata is
+emitted as an `event.name` key-value pair and does not populate or overwrite MDC.
+
+`ContextSource(effect)` reads `F[LogContext]`. Use `ContextSource.fromFields(effect)` for an
+existing `F[Fields]`, or `ContextSource.fromMdc(effect)` for `F[Mdc]`.
+`ContextSource.const` accepts either `LogContext` or `Fields`; `fromAsk` adapts `Ask[F, Fields]`,
+and `fromContextAsk` adapts `Ask[F, LogContext]`. Combine sources with `++`: reads run left to
+right and later values win independently in each channel. Each reader runs once per logging execution.
+Per-call values override ambient values within their channel. SLF4J installs ambient MDC for early
+native enablement; per-call MDC is available during emission, after record construction.
+Unrelated thread MDC entries are excluded during logging and restored afterward.
+
+The optional runtime's `ScopedContext` supplies fiber-local scopes for both channels via
+`withMdc`, `withFields`, or `scope(LogContext(...))`, and exposes a `source` for either direct factories
+or pipelines. `LoggingContext.withContext` / `withMdc` use an existing `Local[F, LogContext]`.
+The field-only `ScopedFields` and `LoggingContext.withFields` helpers remain available.
 
 ### OpenTelemetry
 
 `Otel.resource(provider)` returns `Resource[F, LoggerFactory[F]]`.
-`Otel.resource(provider, source)` also accepts a `ContextSource[F]`; it reads fields after native
-enablement, with per-call fields taking precedence. The logger captures native telemetry context
-separately. The resource owns a Dispatcher for direct lookup; the application owns the provider.
-Prefer `fromName` / `fromClass`: direct OTel lookup blocks while running the provider effect.
+`Otel.resource(provider, source)` accepts the same two-channel context source, read after native
+enablement. Per-call values override source values within each channel. The logger captures native
+telemetry context separately. The resource owns a Dispatcher for direct lookup; the application
+owns the provider. Prefer `fromName` / `fromClass`: direct OTel lookup blocks while running the
+provider effect.
+
+OTel merges both channels into attributes at the adapter boundary. MDC values remain strings;
+structured fields win same-key collisions. `Otel.resource(provider, source, MdcMapping.Prefixed("mdc."))`
+prefixes MDC attribute keys instead. Structured fields also win explicit prefixed-key collisions,
+and generated exception attributes win reserved exception keys when a cause is present.
+`OtelBackend.resource(provider, MdcMapping.Prefixed("mdc."))` configures the runtime adapter.
 
 ## Optional runtime
 
@@ -73,6 +98,10 @@ deliveries within their owning resource's lifetime.
 Each backend retains its own typed context for prepared and queued delivery. Generic records contain
 metadata and payload, with no native context. `OtelBackend.resource(provider, fields)` can also turn
 captured native context into fields shared with other outputs.
+
+`withFields` and `withMdc` supply independent pipeline defaults. `filterFields` sees structured
+fields; `filterContext` sees both effective channels. Console output has separate `mdc` and `fields`
+members; Circe and custom sinks receive both in `EncodedEvent`.
 
 ## Run
 
@@ -97,7 +126,7 @@ All modules target the JVM.
 
 | Module | Purpose | Scala |
 | --- | --- | --- |
-| `module/core` | Logger/factory API, events, context sources, encoding, reference values | 2.12, 2.13, 3 |
+| `module/core` | Logger/factory API, events, MDC and structured context sources, encoding, reference values | 2.12, 2.13, 3 |
 | `module/slf4j` | Direct SLF4J factory and encoding | 2.12, 2.13, 3 |
 | `module/otel` | Direct otel4s factory and encoding | 2.13, 3 |
 | `module/runtime` | Pipelines, context scoping helpers, queues, preparation, console output | 2.12, 2.13, 3 |

@@ -96,11 +96,14 @@ final class RuntimeSuite extends CatsEffectSuite {
       EventMeta(Level.Error, Scope("z.scope"), Some("event"), 7L),
       Value.Obj(Map("quote\"" -> Value.Text("line\n"))),
       Value.Obj(Map("z" -> Value.Int64(2), "a" -> Value.Bool(true))),
-      Some(ex)
+      Some(ex),
+      Mdc("a" -> "diagnostic")
     )
     val rendered = ConsoleRenderer.render(event)
     assert(rendered.indexOf("\"a\"") < rendered.indexOf("\"z\""))
     assert(rendered.contains("line\\n"))
+    assert(rendered.contains("\"mdc\":{\"a\":\"diagnostic\"}"))
+    assert(rendered.contains("\"fields\":{\"a\":true,\"z\":2}"))
     assert(rendered.contains("java.lang.IllegalStateException"))
     assert(rendered.contains("at org.typelevel.log4cats.experimental.RuntimeSuite"))
   }

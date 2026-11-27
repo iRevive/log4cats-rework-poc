@@ -34,7 +34,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
         (_, _) => IO.pure(true)
       )
       plan   = Pipeline.fromBackend[IO](Resource.eval(acquisitions.update(_ + 1).as[Backend[IO]](backend)))
-      source = ContextSource(contexts.update(_ + 1).as(Fields.empty))
+      source = ContextSource.fromFields(contexts.update(_ + 1).as(Fields.empty))
       _ <- Pipeline.runtimeResource(plan, source).use { runtime =>
         val prepare = runtime.prepare(Scope("replay"), Level.Info, None) { writer =>
           constructions += 1
@@ -80,7 +80,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
         effect.attempt
       }
       failingSource = new ContextSource[IO] {
-        def current: IO[Fields] = throw contextFailure
+        def current: IO[org.typelevel.log4cats.experimental.context.LogContext] = throw contextFailure
       }
       contextResult <- Pipeline.runtimeResource(output(backend), failingSource).use { runtime =>
         val logger = runtime.getLoggerFromName("context-failure")
@@ -120,7 +120,7 @@ final class DeliveryContractSuite extends CatsEffectSuite {
         def emit(event: EncodedEvent[Value], context: Int): IO[Unit] =
           IO.raiseError(new AssertionError("rejected output emitted"))
       }
-      source = ContextSource(steps.update(_ :+ "ambient").as(Fields(Field("capture", "ambient"))))
+      source = ContextSource.fromFields(steps.update(_ :+ "ambient").as(Fields(Field("capture", "ambient"))))
       _ <- Pipeline.runtimeResource(output(Backend.constant(first)) ++ output(Backend.constant(second)), source).use {
         runtime =>
           runtime.getLoggerFromName("captures").log(Level.Warn, Some("captured.event"), _.body("ok"))
@@ -235,4 +235,36 @@ final class DeliveryContractSuite extends CatsEffectSuite {
       }
     } yield ()
   }
+
+  test("MDC branch defaults, sources, and call overrides stay independent through prepared replay") {
+    import org.typelevel.log4cats.experimental.Mdc
+    import org.typelevel.log4cats.experimental.context.LogContext
+    for {
+      seen  <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
+      local <- IOLocal(LogContext(Mdc("id" -> "ambient"), Fields(Field("id", 2))))
+      sink = ValueBackend[IO](e => seen.update(_ :+ e), IO.unit, (_, _) => IO.pure(true))
+      branch = Pipeline
+        .fromBackend[IO](Resource.pure[IO, Backend[IO]](sink))
+        .withFields(Fields(Field("id", 1)))
+      plan = (branch.withMdc(Mdc("branch" -> "left", "id" -> "default")) ++
+        branch.withMdc(Mdc("branch" -> "right", "id" -> "default")))
+        .filterContext(c => c.mdc.values("id") == "call")
+      _ <- Pipeline.runtimeResource(plan, ContextSource(local.get)).use { runtime =>
+        for {
+          prepared <- runtime.prepare(Scope("channels"), Level.Info, None) { writer =>
+            writer.mdc("id", "call")
+            writer.field("id", 3)
+          }
+          _ <- local.set(LogContext(Mdc("id" -> "changed")))
+          _ <- prepared.deliver *> prepared.deliver
+        } yield ()
+      }
+      events <- seen.get
+    } yield {
+      assertEquals(events.map(_.mdc.values("branch")), Vector("left", "right", "left", "right"))
+      assert(events.forall(_.mdc.values("id") == "call"))
+      assert(events.forall(_.fields == Value.Obj(Map("id" -> Value.Int64(3)))))
+    }
+  }
+
 }

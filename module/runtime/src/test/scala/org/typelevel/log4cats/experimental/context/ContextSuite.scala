@@ -20,11 +20,11 @@ final class ContextSuite extends CatsEffectSuite {
     val source                   = ContextSource.fromAsk[Reader](ask)
 
     val nested: Reader[(Fields, Fields, Fields)] = for {
-      before <- source.current
+      before <- source.current.map(_.fields)
       inner <- LoggingContext.withFields[Reader, Fields](Fields(Field("k", "inner"))) {
-        source.current
+        source.current.map(_.fields)
       }
-      after <- source.current
+      after <- source.current.map(_.fields)
     } yield (before, inner, after)
 
     val scoped = LoggingContext.withFields[Reader, (Fields, Fields, Fields)](
@@ -104,4 +104,39 @@ final class ContextSuite extends CatsEffectSuite {
       ): Value
     )
   }
+
+  test("two-channel fiber scopes restore on cancellation and remain isolated from siblings") {
+    import cats.effect.Deferred
+    import org.typelevel.log4cats.experimental.Mdc
+    for {
+      scoped   <- ScopedContext.create
+      ready    <- Deferred[IO, Unit]
+      restored <- Deferred[IO, LogContext]
+      outer = LogContext(Mdc("id" -> "outer"), Fields(Field("id", 1)))
+      _ <- scoped.scope(outer) {
+        for {
+          fiber <- scoped
+            .withMdc(Mdc("id" -> "child"))(ready.complete(()) *> IO.never)
+            .onCancel(scoped.current.flatMap(restored.complete).void)
+            .start
+          _       <- ready.get
+          sibling <- scoped.current
+          _       <- fiber.cancel
+          after   <- restored.get
+        } yield {
+          assertEquals(sibling.mdc.values, Map("id" -> "outer"))
+          assertEquals(after.mdc.values, Map("id" -> "outer"))
+          assertEquals(
+            after.fields.encode(org.typelevel.log4cats.experimental.encoding.ValueEncoding.value),
+            Value.Obj(Map("id" -> Value.Int64(1)))
+          )
+        }
+      }
+      after <- scoped.current
+    } yield {
+      assert(after.mdc.isEmpty)
+      assert(after.fields.isEmpty)
+    }
+  }
+
 }

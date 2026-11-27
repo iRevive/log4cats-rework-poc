@@ -49,7 +49,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
     for {
       reads  <- Ref.of[IO, Int](0)
       events <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
-      source = ContextSource(
+      source = ContextSource.fromFields(
         reads.modify(n => (n + 1, Fields(Field("capture", n + 1))))
       )
       backend = ValueBackend[IO](
@@ -74,7 +74,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
     for {
       reads  <- Ref.of[IO, Int](0)
       events <- Ref.of[IO, Vector[(String, Value)]](Vector.empty)
-      source = ContextSource(reads.modify(n => (n + 1, Fields(Field("capture", n + 1)))))
+      source = ContextSource.fromFields(reads.modify(n => (n + 1, Fields(Field("capture", n + 1)))))
       output = (name: String) =>
         Pipeline.fromBackend[IO](
           Resource.pure[IO, Backend[IO]](

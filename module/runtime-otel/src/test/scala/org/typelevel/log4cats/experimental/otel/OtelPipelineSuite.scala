@@ -56,7 +56,7 @@ final class OtelPipelineSuite extends CatsEffectSuite {
           .atLeast(Level.Debug)
         plan = (consolePlan ++ otelPlan)
           .withContextSource(
-            ContextSource(
+            ContextSource.fromFields(
               captures.update(_ + 1).as(Fields(Field("request.id", "request-1")))
             )
           )
@@ -193,4 +193,52 @@ final class OtelPipelineSuite extends CatsEffectSuite {
       }
     }
   }
+
+  test("OTel merging is output-local and encoded delivery uses the same mapping as preparation") {
+    import org.typelevel.log4cats.experimental.Mdc
+    import org.typelevel.log4cats.experimental.context.LogContext
+    import org.typelevel.log4cats.experimental.backend.EventMeta
+    LogsTestkit.inMemory[IO]().use { kit =>
+      for {
+        seen <- Ref.of[IO, Vector[EncodedEvent[Value]]](Vector.empty)
+        sink = ValueBackend[IO](e => seen.update(_ :+ e), IO.unit, (_, _) => IO.pure(true))
+        backend <- OtelBackend.resource(kit.loggerProvider, MdcMapping.Prefixed("mdc.")).allocated
+        (otel, release) = backend
+        _ <- (for {
+          bound    <- otel.bind(Scope("encoded"))
+          captured <- bound.capture(EventMeta(Level.Info, Scope("encoded"), None, 1L))
+          _ <- bound.emit(
+            EncodedEvent[bound.Repr](
+              EventMeta(Level.Info, Scope("encoded"), None, 1L),
+              bound.encoding.text("encoded"),
+              bound.encoding.obj().result(),
+              None,
+              Mdc("id" -> "diagnostic")
+            ),
+            captured
+          )
+          plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](sink)) ++
+            Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](otel))
+          _ <- Pipeline
+            .runtimeResource(plan, ContextSource.const[IO](LogContext(Mdc("id" -> "diagnostic"))))
+            .use { runtime =>
+              for {
+                prepared <- runtime.prepare(Scope("prepared"), Level.Info, None)(_.field("id", 42))
+                _        <- prepared.deliver *> prepared.deliver
+              } yield ()
+            }
+        } yield ()).guarantee(release)
+        events  <- seen.get
+        records <- kit.finishedLogs
+      } yield {
+        assertEquals(events.size, 2)
+        assert(events.forall(_.mdc.values == Map("id" -> "diagnostic")))
+        assert(events.forall(_.fields == Value.Obj(Map("id" -> Value.Int64(42)))))
+        assertEquals(records.size, 3)
+        assert(records.forall(_.getAttributes.get(JAttributeKey.stringKey("mdc.id")) == "diagnostic"))
+        assertEquals(records.last.getAttributes.get(JAttributeKey.longKey("id")), java.lang.Long.valueOf(42))
+      }
+    }
+  }
+
 }

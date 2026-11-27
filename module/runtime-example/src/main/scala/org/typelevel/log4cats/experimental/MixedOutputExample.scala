@@ -40,7 +40,7 @@ object MixedOutputExample extends IOApp.Simple {
         OtelBackend.resource(kit.loggerProvider)
       }
       .atLeast(Level.Debug)
-    val request = ContextSource(IO.pure(Fields(Field("request.id", "req-42"))))
+    val request = ContextSource.fromMdc(IO.pure(Mdc("request.id" -> "req-42")))
     val outputs = (primary ++ telemetry)
       .withFields(Fields(Field("service", "checkout")))
       .withContextSource(request)

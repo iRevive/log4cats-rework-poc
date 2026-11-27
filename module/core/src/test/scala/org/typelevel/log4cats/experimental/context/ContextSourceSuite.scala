@@ -12,11 +12,11 @@ final class ContextSourceSuite extends CatsEffectSuite {
     for {
       reads <- Ref.of[IO, Vector[String]](Vector.empty)
       value <- Ref.of[IO, Int](1)
-      left = ContextSource(
+      left = ContextSource.fromFields(
         reads.update(_ :+ "left") *> value.get.map(n => Fields(Field("value", n), Field("winner", "left")))
       )
-      right  = ContextSource(reads.update(_ :+ "right").as(Fields(Field("winner", "right"))))
-      source = (left ++ right).map(_ ++ Fields(Field("mapped", true)))
+      right  = ContextSource.fromFields(reads.update(_ :+ "right").as(Fields(Field("winner", "right"))))
+      source = (left ++ right).map(c => c.copy(fields = c.fields ++ Fields(Field("mapped", true))))
       effect = source.current
       before <- reads.get
       first  <- effect
@@ -28,8 +28,8 @@ final class ContextSourceSuite extends CatsEffectSuite {
       assertEquals(after, Vector("left", "right", "left", "right"))
       def expected(n: Long): Value =
         Value.Obj(Map("value" -> Value.Int64(n), "winner" -> Value.Text("right"), "mapped" -> Value.Bool(true)))
-      assertEquals(first.encode(ValueEncoding.value), expected(1))
-      assertEquals(second.encode(ValueEncoding.value), expected(2))
+      assertEquals(first.fields.encode(ValueEncoding.value), expected(1))
+      assertEquals(second.fields.encode(ValueEncoding.value), expected(2))
     }
   }
 
@@ -37,8 +37,8 @@ final class ContextSourceSuite extends CatsEffectSuite {
     val failure = new RuntimeException("source failure")
     for {
       reads <- Ref.of[IO, Int](0)
-      left  = ContextSource(IO.raiseError[Fields](failure))
-      right = ContextSource(reads.update(_ + 1).as(Fields.empty))
+      left  = ContextSource.fromFields(IO.raiseError[Fields](failure))
+      right = ContextSource.fromFields(reads.update(_ + 1).as(Fields.empty))
       result <- (left ++ right).current.attempt
       count  <- reads.get
     } yield {
@@ -46,4 +46,15 @@ final class ContextSourceSuite extends CatsEffectSuite {
       assertEquals(count, 0)
     }
   }
+
+  test("sources compose both channels independently, including same-key values") {
+    import org.typelevel.log4cats.experimental.Mdc
+    val left  = ContextSource.const[IO](LogContext(Mdc("id" -> "left"), Fields(Field("id", 1))))
+    val right = ContextSource.const[IO](LogContext(Mdc("id" -> "right"), Fields(Field("id", 2))))
+    (left ++ right).current.map { context =>
+      assertEquals(context.mdc.values, Map("id" -> "right"))
+      assertEquals(context.fields.encode(ValueEncoding.value), Value.Obj(Map("id" -> Value.Int64(2))))
+    }
+  }
+
 }

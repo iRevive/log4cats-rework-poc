@@ -2,10 +2,11 @@ package org.typelevel.log4cats.experimental.internal
 
 import org.typelevel.log4cats.experimental.Body
 import org.typelevel.log4cats.experimental.encoding.Encoder
-import org.typelevel.log4cats.experimental.{Field, Fields, RecordWriter}
+import org.typelevel.log4cats.experimental.{Field, Fields, Mdc, RecordWriter}
 import scala.collection.mutable
 
 private final class AccumulatingRecordWriter extends RecordWriter {
+  private var currentMdc: Mdc                 = Mdc.empty
   private var open                            = true
   private var currentBody: Option[Body]       = None
   private val pendingFields                   = mutable.LinkedHashMap.empty[String, Field]
@@ -33,6 +34,16 @@ private final class AccumulatingRecordWriter extends RecordWriter {
     }
   }
 
+  def mdc(name: String, value: String): Unit = {
+    checkOpen()
+    mdc(Mdc(name -> value))
+  }
+
+  def mdc(value: Mdc): Unit = {
+    checkOpen()
+    currentMdc = currentMdc ++ value
+  }
+
   def cause(error: Throwable): Unit = {
     checkOpen()
     require(error != null, "cause cannot be null")
@@ -48,7 +59,8 @@ private final class AccumulatingRecordWriter extends RecordWriter {
     RecordData(
       currentBody.getOrElse(Body.empty),
       Fields.from(pendingFields.values.toVector),
-      currentCause
+      currentCause,
+      currentMdc
     )
   }
 

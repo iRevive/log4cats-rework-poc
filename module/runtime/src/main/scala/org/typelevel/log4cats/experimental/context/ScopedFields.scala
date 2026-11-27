@@ -13,5 +13,5 @@ final class ScopedFields private (local: IOLocal[Fields]) {
 
 object ScopedFields {
   def create: IO[ScopedFields]                               = IOLocal(Fields.empty).map(new ScopedFields(_))
-  def contextSource(scoped: ScopedFields): ContextSource[IO] = ContextSource(scoped.current)
+  def contextSource(scoped: ScopedFields): ContextSource[IO] = ContextSource.fromFields(scoped.current)
 }

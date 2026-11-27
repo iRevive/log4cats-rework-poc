@@ -11,7 +11,11 @@ object ConsoleRenderer {
       "scope"          -> quote(event.meta.scope.name),
       "timestampNanos" -> event.meta.timestampNanos.toString
     ) ++ event.meta.eventName.toVector.map(n => "eventName" -> quote(n)) ++
-      Vector("fields" -> renderValue(Value.Obj(fields)), "body" -> renderValue(event.body)) ++
+      Vector(
+        "mdc"    -> renderValue(Value.Obj(event.mdc.values.map { case (k, v) => k -> Value.Text(v) })),
+        "fields" -> renderValue(Value.Obj(fields)),
+        "body"   -> renderValue(event.body)
+      ) ++
       event.cause.toVector.map(t => "throwable" -> quote(stackTrace(t)))
     "{" + members.map { case (k, v) => quote(k) + ":" + v }.mkString(",") + "}"
   }
