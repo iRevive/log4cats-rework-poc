@@ -28,7 +28,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
     b    = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](rightBackend))
     plan = if (combinedQueue) (a ++ b).async(2) else a.async(2) ++ b
     _ <- Pipeline.runtimeResource(plan).use { runtime =>
-      val logger = runtime.fromNameUnsafe("topology")
+      val logger = runtime.getLoggerFromName("topology")
       for {
         _      <- logger.info("event")
         _      <- entered.get
@@ -59,7 +59,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
       )
       output = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend))
       plan   = output.withContextSource(source) ++ output.withContextSource(source)
-      _        <- Pipeline.runtimeResource(plan).use(_.fromNameUnsafe("separate-nodes").info("event"))
+      _        <- Pipeline.runtimeResource(plan).use(_.getLoggerFromName("separate-nodes").info("event"))
       recorded <- events.get
     } yield assertEquals(
       recorded.map(_.fields),
@@ -89,7 +89,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
         .withContextSource(source)
         .withFields(Fields(Field("static", true)))
       _ <- Pipeline.runtimeResource(plan).use { runtime =>
-        runtime.fromNameUnsafe("shared").info("event") *> runtime.flush
+        runtime.getLoggerFromName("shared").info("event") *> runtime.flush
       }
       count    <- reads.get
       recorded <- events.get
@@ -111,7 +111,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
       )
       plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend)).async(2).async(2)
       _ <- Pipeline.runtimeResource(plan).use { runtime =>
-        val logger = runtime.fromNameUnsafe("nested")
+        val logger = runtime.getLoggerFromName("nested")
         logger.info("one") *> logger.info("two") *> runtime.flush *>
           events.get.flatMap(n => IO(assertEquals(n, 2)))
       }
@@ -132,7 +132,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
         .filterFields(_.contains("keep"))
         .async(1)
       _ <- Pipeline.runtimeResource(plan).use { runtime =>
-        val logger = runtime.fromNameUnsafe("no-rejected-admission")
+        val logger = runtime.getLoggerFromName("no-rejected-admission")
         val kept   = Event.message("kept").withField("keep", true)
         (logger.infoEvent(kept) *> entered.get *> logger.infoEvent(kept) *>
           logger.info("rejected").timeout(1.second)).guarantee(release.complete(()).void)
@@ -171,7 +171,7 @@ final class PipelineTopologySuite extends CatsEffectSuite {
         .withFields(Fields(Field("key", "first")))
         .atLeast(Level.Info)
         .withFields(Fields(Field("key", "second")))
-      _      <- Pipeline.runtimeResource(plan).use(_.fromNameUnsafe("defaults").info("event"))
+      _      <- Pipeline.runtimeResource(plan).use(_.getLoggerFromName("defaults").info("event"))
       values <- events.get
     } yield assertEquals(values.head.fields, Value.Obj(Map("key" -> Value.Text("second"))): Value)
   }

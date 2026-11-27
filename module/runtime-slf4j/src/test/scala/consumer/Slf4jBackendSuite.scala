@@ -79,7 +79,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
         Pipeline.resource(output).use { factory =>
           val safe = factory.fromName("safe")
           assertEquals(lookups.get(), 0)
-          val unsafe = factory.fromNameUnsafe("unsafe")
+          val unsafe = factory.getLoggerFromName("unsafe")
           assertEquals(lookups.get(), 1)
           for {
             logger   <- safe
@@ -109,8 +109,8 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
         }
       }
       Pipeline.resource(plan(context)).use { factory =>
-        val restricted = factory.fromNameUnsafe("restricted")
-        val enabled    = factory.fromNameUnsafe("enabled")
+        val restricted = factory.getLoggerFromName("restricted")
+        val enabled    = factory.getLoggerFromName("enabled")
         for {
           _ <- restricted.infoEvent { builds += 1; Event.body("skipped")(encoder) }
           _ <- restricted.errorEvent { builds += 1; Event.body("accepted")(encoder) }
@@ -138,7 +138,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
       val request = ContextSource(IO.pure(Fields(Field("request.id", "req-42"), Field("attempt", 2))))
       val output  = plan(context).withFields(Fields(Field("service", "checkout"), Field("attempt", 1)))
       Pipeline.resource(output, request).use { factory =>
-        val logger = factory.fromNameUnsafe("structured")
+        val logger = factory.getLoggerFromName("structured")
         logger
           .infoEvent("checkout.completed") {
             Event
@@ -216,7 +216,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
         }
       }
       Pipeline.resource(plan(context) ++ plan(context)).use { factory =>
-        factory.fromNameUnsafe("broken").infoEvent(Event.body("body")(broken)).attempt.map { result =>
+        factory.getLoggerFromName("broken").infoEvent(Event.body("body")(broken)).attempt.map { result =>
           assertEquals(result, Left(failure): Either[Throwable, Unit])
           assertEquals(encodes, 2)
           assert(appender.events.isEmpty)

@@ -28,8 +28,8 @@ final class LoggerFactorySuite extends CatsEffectSuite {
         for {
           byName  <- LoggerFactory[IO].fromName("safe")
           byClass <- LoggerFactory[IO].fromClass(classOf[String])
-          unsafeName  = LoggerFactory[IO].fromNameUnsafe("unsafe")
-          unsafeClass = LoggerFactory[IO].fromClassUnsafe(classOf[Int])
+          unsafeName  = LoggerFactory[IO].getLoggerFromName("unsafe")
+          unsafeClass = LoggerFactory[IO].getLoggerFromClass(classOf[Int])
           before <- (acquisitions.get, releases.get, captures.get, events.get).tupled
           _      <- IO(assertEquals(before, (1, 0, 0, Vector.empty[EncodedEvent[Value]])))
           _ <- byName.info("safe") *> byClass.info("class") *> unsafeName.info("unsafe") *> unsafeClass.info(
@@ -61,8 +61,8 @@ final class LoggerFactorySuite extends CatsEffectSuite {
       for {
         first  <- factory.fromName("first")
         second <- factory.fromClass(classOf[String])
-        third  = factory.fromNameUnsafe("third")
-        fourth = factory.fromClassUnsafe(classOf[Int])
+        third  = factory.getLoggerFromName("third")
+        fourth = factory.getLoggerFromClass(classOf[Int])
         _ <- first.info("one") *> first.info("again") *> second.info("two") *> third.info("three") *> fourth.info(
           "four"
         )
@@ -73,20 +73,16 @@ final class LoggerFactorySuite extends CatsEffectSuite {
     }
   }
 
-  test("safe construction suspends validation while unsafe construction validates immediately") {
+  test("effectful name lookup and direct lookup reject invalid names") {
     val plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](ConsoleBackend.stdout[IO]))
     Pipeline.resource(plan).use { factory =>
-      val invalidName  = factory.fromName("")
-      val invalidClass = factory.fromClass(null)
-      intercept[IllegalArgumentException](factory.fromNameUnsafe(""))
-      intercept[NullPointerException](factory.fromClassUnsafe(null))
+      val invalidName = factory.fromName("")
+      intercept[IllegalArgumentException](factory.getLoggerFromName(""))
+      intercept[NullPointerException](factory.getLoggerFromClass(null))
+      intercept[NullPointerException](factory.fromClass(null))
       for {
-        nameResult  <- invalidName.attempt
-        classResult <- invalidClass.attempt
-      } yield {
-        assert(nameResult.swap.exists(_.isInstanceOf[IllegalArgumentException]))
-        assert(classResult.swap.exists(_.isInstanceOf[NullPointerException]))
-      }
+        nameResult <- invalidName.attempt
+      } yield assert(nameResult.swap.exists(_.isInstanceOf[IllegalArgumentException]))
     }
   }
 
@@ -104,8 +100,8 @@ final class LoggerFactorySuite extends CatsEffectSuite {
       )
       plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend)).async(1)
       _ <- Pipeline.runtimeResource(plan).use { runtime =>
-        val first  = runtime.fromNameUnsafe("first")
-        val second = runtime.fromNameUnsafe("second")
+        val first  = runtime.getLoggerFromName("first")
+        val second = runtime.getLoggerFromName("second")
         (for {
           _      <- first.info("one")
           _      <- entered.get

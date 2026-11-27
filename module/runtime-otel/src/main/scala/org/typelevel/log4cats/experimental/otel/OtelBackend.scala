@@ -31,7 +31,7 @@ object OtelBackend {
       fields: Ctx => Fields = (_: Ctx) => Fields.empty
   )(implicit F: Async[F]): Resource[F, Backend[F]] = Dispatcher.parallel[F].map { dispatcher =>
     new Backend[F] {
-      def bind(scope: Scope): F[BoundBackend[F]]    = F.defer(provider.get(scope.name)).map(bound)
+      def bind(scope: Scope): F[BoundBackend[F]]    = provider.get(scope.name).map(bound)
       def bindUnsafe(scope: Scope): BoundBackend[F] = bound(dispatcher.unsafeRunSync(provider.get(scope.name)))
       private def bound(native: Logger[F, Ctx]): BoundBackend[F] = {
         val logger = new OtelLogger[F, Ctx](native, ContextSource.empty[F])(F, clock)

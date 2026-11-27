@@ -10,16 +10,18 @@ Start with [Slf4jExample](module/example/src/main/scala/org/typelevel/log4cats/e
 Ordinary SLF4J usage needs no pipeline or logging runtime:
 
 ```scala
+val factory = Slf4j.factory[IO]
+
 for {
-  factory <- Slf4j.factory[IO]
-  logger  <- factory.fromName("checkout")
+  logger <- factory.fromName("checkout")
   _       <- logger.info("ready")
 } yield ()
 ```
 
-`Slf4j.factory` also accepts an explicit `org.slf4j.ILoggerFactory`. Named loggers retain native
+`Slf4j.factory` returns `LoggerFactory[F]` directly and also accepts an explicit `org.slf4j.ILoggerFactory`. Named loggers retain native
 handles and respect native level configuration. SLF4J owns timestamps and output configuration.
-Native checks and emission use `F.delay`, with no blocking-pool boundary.
+`fromName`/`fromClass` return `F[Logger[F]]`; `getLoggerFromName`/`getLoggerFromClass` return
+`Logger[F]` directly, following log4cats naming. Native checks and emission use `F.delay`, with no blocking-pool boundary.
 For dynamic fields, pass a core `ContextSource[F]`, for example
 `Slf4j.factory[IO](ContextSource(local.get))` with an `IOLocal[Fields]`.
 Construct sources with `ContextSource(effect)`, `ContextSource.const(fields)`, or

@@ -30,7 +30,7 @@ final class OtelBindingSuite extends CatsEffectSuite {
             safeLogger   <- safe
             afterSafe    <- lookups.get
             _            <- IO(assertEquals(afterSafe, Vector("caller")))
-            unsafeLogger <- IO.blocking(factory.fromNameUnsafe("unsafe.component"))
+            unsafeLogger <- IO.blocking(factory.getLoggerFromName("unsafe.component"))
             afterUnsafe  <- lookups.get
             _            <- IO(assertEquals(afterUnsafe.size, 2))
             _            <- safeLogger.info("one") *> safeLogger.info("two") *> unsafeLogger.info("three")

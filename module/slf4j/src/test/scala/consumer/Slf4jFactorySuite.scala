@@ -39,16 +39,16 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         def getLogger(name: String): org.slf4j.Logger = { lookups += 1; context.getLogger(name) }
       }
       context.getLogger("restricted").setLevel(NativeLevel.ERROR)
+      val factory = Slf4j.factory[IO](native)
+      val safe    = factory.fromName("restricted")
       for {
-        factory <- Slf4j.factory[IO](native)
-        safe = factory.fromName("restricted")
         _       <- IO(assertEquals(lookups, 0))
         logger  <- safe
         _       <- logger.info { builds += 1; "skipped" }
         _       <- logger.error { builds += 1; "first" }
         _       <- logger.error("second")
         _       <- IO(assertEquals(lookups, 1))
-        unsafe  <- IO(factory.fromClassUnsafe(classOf[String]))
+        unsafe  <- IO(factory.getLoggerFromClass(classOf[String]))
         _       <- unsafe.fatal("fatal")
         invalid <- factory.fromName("").attempt
       } yield {
@@ -59,17 +59,17 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         assertEquals(appender.list.get(2).getLoggerName, classOf[String].getName)
         assertEquals(appender.list.get(2).getLevel, NativeLevel.ERROR)
         assert(context.isStarted)
-        intercept[IllegalArgumentException](factory.fromNameUnsafe(""))
+        intercept[IllegalArgumentException](factory.getLoggerFromName(""))
       }
     }
   }
 
   test("direct logging preserves named structured fields, literal messages, and throwable identity") {
     recording.use { case (context, appender) =>
-      val cause = new IllegalStateException("original")
+      val cause   = new IllegalStateException("original")
+      val factory = Slf4j.factory[IO](context)
       for {
-        factory <- Slf4j.factory[IO](context)
-        logger  <- factory.fromName("checkout")
+        logger <- factory.fromName("checkout")
         _ <- logger.infoEvent("checkout.completed") {
           Event.body(Map("count" -> 2)).withField("event.name", "shadowed").withField("request.id", 42)
         }
@@ -94,9 +94,9 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
       val broken = new Encoder[Int] {
         def encode[V](value: Int)(out: ValueEncoding[V]): V = throw failure
       }
+      val factory = Slf4j.factory[IO](context)
       for {
-        factory <- Slf4j.factory[IO](context)
-        logger  <- factory.fromName("replay")
+        logger <- factory.fromName("replay")
         effect = logger.info { builds += 1; "replayed" }
         _        <- IO(assertEquals(builds, 0))
         _        <- effect *> effect
@@ -117,8 +117,8 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         reads <- Ref.of[IO, Int](0)
         source = ContextSource(reads.update(_ + 1) *> local.get) ++
           ContextSource.const[IO](Fields(Field("service", "checkout")))
-        factory <- Slf4j.factory[IO](native, source)
-        logger  <- factory.fromName("contextual")
+        factory = Slf4j.factory[IO](native, source)
+        logger <- factory.fromName("contextual")
         effect = logger.infoEvent("checkout.completed") {
           Event.message("complete").withField("attempt", 2)
         }
@@ -127,7 +127,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
           local.set(Fields(Field("request.id", "left"), Field("attempt", 1))) *> effect,
           local.set(Fields(Field("request.id", "right"), Field("attempt", 1))) *> effect
         ).parTupled
-        other = factory.fromNameUnsafe("other")
+        other = factory.getLoggerFromName("other")
         _     <- other.info("parent")
         count <- reads.get
       } yield {
@@ -164,12 +164,12 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
           ) ch.qos.logback.core.spi.FilterReply.ACCEPT
           else ch.qos.logback.core.spi.FilterReply.DENY
       })
-      var builds = 0
+      var builds  = 0
+      val factory = Slf4j.factory[IO](native, ContextSource.const[IO](Fields(Field("request.id", "req-42"))))
       for {
-        factory <- Slf4j.factory[IO](native, ContextSource.const[IO](Fields(Field("request.id", "req-42"))))
-        logger  <- factory.fromName("filtered")
-        _       <- logger.infoEvent("checkout.completed") { builds += 1; Event.message("accepted") }
-        _       <- logger.info { builds += 1; "rejected" }
+        logger <- factory.fromName("filtered")
+        _      <- logger.infoEvent("checkout.completed") { builds += 1; Event.message("accepted") }
+        _      <- logger.info { builds += 1; "rejected" }
       } yield {
         assertEquals(builds, 1)
         assertEquals(appender.list.size(), 1)
@@ -186,8 +186,8 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
           org.slf4j.MDC.clear()
           org.slf4j.MDC.put("host", "retained")
           val context = ContextSource.const[SyncIO](Fields(Field("request.id", "req-42")))
-          val factory = Slf4j.factory[SyncIO](native, context).unsafeRunSync()
-          val logger  = factory.fromNameUnsafe("restoration")
+          val factory = Slf4j.factory[SyncIO](native, context)
+          val logger  = factory.getLoggerFromName("restoration")
           logger.info("success").unsafeRunSync()
           assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "retained"))
           assertEquals(appender.list.get(0).getMDCPropertyMap.asScala.toMap, Map("request.id" -> "req-42"))
@@ -212,8 +212,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
           }
           val failed = Slf4j
             .factory[SyncIO](throwingFactory, context)
-            .unsafeRunSync()
-            .fromNameUnsafe("failure")
+            .getLoggerFromName("failure")
             .info("failure")
             .attempt
             .unsafeRunSync()
@@ -229,9 +228,9 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
     recording.use { case (native, appender) =>
       val failure = new RuntimeException("context failure")
       var builds  = 0
+      val factory = Slf4j.factory[IO](native, ContextSource(IO.raiseError[Fields](failure)))
       for {
-        factory <- Slf4j.factory[IO](native, ContextSource(IO.raiseError[Fields](failure)))
-        logger  <- factory.fromName("failed-context")
+        logger <- factory.fromName("failed-context")
         effect = logger.info { builds += 1; "unreachable" }
         result <- effect.attempt
       } yield {

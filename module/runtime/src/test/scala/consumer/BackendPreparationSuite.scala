@@ -73,7 +73,7 @@ final class BackendPreparationSuite extends CatsEffectSuite {
       }
       plan = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](first)) ++
         Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](Backend.constant(broken)))
-      result <- Pipeline.runtimeResource(plan).use(_.fromNameUnsafe("failure").info("event")).attempt
+      result <- Pipeline.runtimeResource(plan).use(_.getLoggerFromName("failure").info("event")).attempt
       count  <- emitted.get
     } yield {
       assertEquals(result, Left(failure): Either[Throwable, Unit])

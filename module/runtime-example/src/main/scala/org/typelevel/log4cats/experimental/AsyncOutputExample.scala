@@ -13,7 +13,7 @@ object AsyncOutputExample extends IOApp.Simple {
       .async(16)
 
     Pipeline.runtimeResource(output).use { runtime =>
-      val logger = runtime.fromNameUnsafe("async.checkout")
+      val logger = runtime.getLoggerFromName("async.checkout")
       logger.info("checkout accepted") *> runtime.flush
     }
   }

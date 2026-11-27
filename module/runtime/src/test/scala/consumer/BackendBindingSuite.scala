@@ -65,7 +65,7 @@ final class BackendBindingSuite extends CatsEffectSuite {
       _ <- Pipeline.resource(Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend))).use { factory =>
         for {
           first <- factory.fromName("first")
-          second = factory.fromNameUnsafe("second")
+          second = factory.getLoggerFromName("second")
           _ <- first.info("one") *> second.info("two")
         } yield ()
       }

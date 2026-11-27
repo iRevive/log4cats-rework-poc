@@ -110,7 +110,7 @@ final class OtelPipelineSuite extends CatsEffectSuite {
       Pipeline.runtimeResource(plan).use { runtime =>
         for {
           first   <- runtime.fromName("first.component")
-          second  <- IO.blocking(runtime.fromNameUnsafe("second.component"))
+          second  <- IO.blocking(runtime.getLoggerFromName("second.component"))
           _       <- kit.contextManager.scope(producer)(first.info("one") *> second.info("two")) *> runtime.flush
           records <- kit.finishedLogs
         } yield {
