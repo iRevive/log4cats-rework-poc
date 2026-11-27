@@ -187,7 +187,8 @@ final class OtelSuite extends CatsEffectSuite {
       OtelBackend.resourceWithClock(kit.loggerProvider, controlledClock).use { back =>
         val resource = Pipeline.resource(Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](back)))(
           implicitly[cats.effect.Sync[IO]],
-          controlledClock
+          controlledClock,
+          cats.effect.std.Console[IO]
         )
         resource.use { factory =>
           val cause = new IllegalArgumentException("bad input")

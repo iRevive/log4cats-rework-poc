@@ -103,6 +103,36 @@ captured native context into fields shared with other outputs.
 fields; `filterContext` sees both effective channels. Console output has separate `mdc` and `fields`
 members; Circe and custom sinks receive both in `EncodedEvent`.
 
+### Delivery errors
+
+Pipeline outputs report sink delivery errors to stderr through `cats.effect.std.Console` and
+continue by default. Runtime resource construction takes an implicit `Console[F]` (available
+for `IO` and supported transformers). A failed output does not skip later siblings, and an async
+queue keeps processing later records. Failed records are not retried.
+
+To use your own reporter:
+
+```scala
+import org.typelevel.log4cats.experimental.pipeline.DeliveryFailurePolicy
+
+val policy = DeliveryFailurePolicy.reportAndContinue[IO](failure => reportToMonitoring(failure))
+val outputs = (primary ++ telemetry).withDeliveryFailurePolicy(policy).async(256)
+```
+
+A `DeliveryFailure` contains the level, logger scope, event name, and original error. Reporters run
+as part of delivery, so they should finish promptly and must not log through the same failing
+pipeline. If a reporter fails, diagnostics fall back to Console's stderr once, without invoking
+that reporter again. A fallback failure is swallowed.
+
+All delivery policies report and continue. Policies set on individual branches override enclosing
+policies. Ordinary delivery errors never permanently fail the queue or discard its pending work.
+
+Capture, enablement, callback, validation, and encoding errors still propagate. Preparation failure
+still prevents all selected outputs from delivering. Cancellation, closed queues, worker termination,
+and shutdown timeouts retain their existing behavior. After recovered delivery errors, `flush` and
+release succeed; the reporter is the error channel, and no historical error list is retained.
+These policies apply to pipelines only. Direct SLF4J and OTel factories keep their existing behavior.
+
 ## Run
 
 Use sbt from the repository root. CI uses JDK 17.

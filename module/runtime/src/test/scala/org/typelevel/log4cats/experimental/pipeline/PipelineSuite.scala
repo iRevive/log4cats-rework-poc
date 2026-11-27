@@ -248,7 +248,7 @@ final class PipelineSuite extends CatsEffectSuite {
       output = Pipeline
         .fromBackend[IO](Resource.pure(backend(e => times.update(_ :+ e.meta.timestampNanos))))
         .atLeast(Level.Info)
-      resource = Pipeline.resource(output, context)(Sync[IO], suppliedClock)
+      resource = Pipeline.resource(output, context)(Sync[IO], suppliedClock, cats.effect.std.Console[IO])
       _ <- resource.use { factory =>
         val logger = factory.getLoggerFromName("clock")
         logger.debug("disabled") *> (clockReads.get, contextReads.get).tupled.flatMap { before =>

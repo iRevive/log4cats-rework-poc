@@ -195,24 +195,26 @@ final class DeliveryContractSuite extends CatsEffectSuite {
     } yield assertEquals(count, 1)
   }
 
-  test("delivery is sequential and fail-fast, retaining earlier emissions") {
-    val failure = new RuntimeException("emit failed")
+  test("delivery stays sequential and continues after a failed output") {
+    val failure = new RuntimeException("emit failed") { override def printStackTrace(): Unit = () }
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
       first  = ValueBackend[IO](_ => emitted.update(_ :+ "first"), IO.pure(()), (_, _) => IO.pure(true))
       broken = ValueBackend[IO](_ => throw failure, IO.pure(()), (_, _) => IO.pure(true))
       later  = ValueBackend[IO](_ => emitted.update(_ :+ "later"), IO.pure(()), (_, _) => IO.pure(true))
       result <- Pipeline
-        .runtimeResource(output(first) ++ output(broken) ++ output(later))
+        .runtimeResource(
+          output(first) ++ output(broken) ++ output(later)
+        )
         .use { runtime =>
-          val logger = runtime.getLoggerFromName("fail-fast")
+          val logger = runtime.getLoggerFromName("sequential")
           logger.info("event")
         }
         .attempt
       seen <- emitted.get
     } yield {
-      assertEquals(result, Left(failure): Either[Throwable, Unit])
-      assertEquals(seen, Vector("first"))
+      assertEquals(result, Right(()): Either[Throwable, Unit])
+      assertEquals(seen, Vector("first", "later"))
     }
   }
 
@@ -267,4 +269,138 @@ final class DeliveryContractSuite extends CatsEffectSuite {
     }
   }
 
+  test("recovery isolates sibling outputs and keeps queued records and replay running") {
+    import org.typelevel.log4cats.experimental.pipeline.{DeliveryFailure, DeliveryFailurePolicy}
+    val failure = new RuntimeException("transient sink")
+    for {
+      attempts <- Ref.of[IO, Int](0)
+      seen     <- Ref.of[IO, Vector[String]](Vector.empty)
+      reports  <- Ref.of[IO, Vector[DeliveryFailure]](Vector.empty)
+      broken = ValueBackend[IO](
+        _ =>
+          attempts.getAndUpdate(_ + 1).flatMap {
+            case 0 => IO.raiseError(failure)
+            case _ => seen.update(_ :+ "recovered")
+          },
+        IO.unit,
+        (_, _) => IO.pure(true)
+      )
+      later  = ValueBackend[IO](_ => seen.update(_ :+ "sibling"), IO.unit, (_, _) => IO.pure(true))
+      policy = DeliveryFailurePolicy.reportAndContinue[IO](e => reports.update(_ :+ e))
+      plan   = (output(broken) ++ output(later)).async(2).withDeliveryFailurePolicy(policy)
+      _ <- Pipeline.runtimeResource(plan).use { runtime =>
+        for {
+          prepared <- runtime.prepare(Scope("recover"), Level.Warn, Some("event"))(_.body("payload"))
+          _        <- prepared.deliver *> runtime.flush
+          _        <- prepared.deliver *> runtime.flush
+          _        <- runtime.getLoggerFromName("recover").info("later record")
+        } yield ()
+      }
+      all    <- seen.get
+      errors <- reports.get
+    } yield {
+      assertEquals(all, Vector("sibling", "recovered", "sibling", "recovered", "sibling"))
+      assertEquals(errors, Vector(DeliveryFailure(Level.Warn, Scope("recover"), Some("event"), failure)))
+    }
+  }
+
+  test("default recovery continues to synchronous siblings and later records") {
+    val failure = new RuntimeException("default recovery") {
+      override def printStackTrace(): Unit = ()
+    }
+    for {
+      count <- Ref.of[IO, Int](0)
+      broken = ValueBackend[IO](_ => IO.raiseError(failure), IO.unit, (_, _) => IO.pure(true))
+      later  = ValueBackend[IO](_ => count.update(_ + 1), IO.unit, (_, _) => IO.pure(true))
+      _ <- Pipeline.resource(output(broken) ++ output(later)).use { factory =>
+        val logger = factory.getLoggerFromName("default")
+        logger.info("one") *> logger.info("two")
+      }
+      delivered <- count.get
+    } yield assertEquals(delivered, 2)
+  }
+
+  test("branch policies override enclosing defaults and reporter failure does not stop siblings") {
+    import org.typelevel.log4cats.experimental.pipeline.DeliveryFailurePolicy
+    val error = new RuntimeException("sink") { override def printStackTrace(): Unit = () }
+    val reporterError = new RuntimeException("reporter") {
+      override def printStackTrace(): Unit = ()
+    }
+    for {
+      seen    <- Ref.of[IO, Int](0)
+      reports <- Ref.of[IO, Int](0)
+      broken = ValueBackend[IO](_ => IO.raiseError(error), IO.unit, (_, _) => IO.pure(true))
+      later  = ValueBackend[IO](_ => seen.update(_ + 1), IO.unit, (_, _) => IO.pure(true))
+      recovering = output(broken).withDeliveryFailurePolicy(DeliveryFailurePolicy.reportAndContinue[IO] { _ =>
+        reports.update(_ + 1) *> IO.raiseError(reporterError)
+      })
+      _ <- Pipeline
+        .resource((recovering ++ output(later)).withDeliveryFailurePolicy(DeliveryFailurePolicy.stderr[IO]))
+        .use(_.getLoggerFromName("branch").info("event"))
+      count    <- seen.get
+      attempts <- reports.get
+    } yield {
+      assertEquals(count, 1)
+      assertEquals(attempts, 1)
+    }
+  }
+
+  test("delivery recovery does not swallow callback, encoder, context or preparation errors") {
+    import org.typelevel.log4cats.experimental.pipeline.DeliveryFailurePolicy
+    val error = new RuntimeException("programming error")
+    for {
+      reports   <- Ref.of[IO, Int](0)
+      emissions <- Ref.of[IO, Int](0)
+      backend = ValueBackend[IO](_ => emissions.update(_ + 1), IO.unit, (_, _) => IO.pure(true))
+      plan = output(backend).withDeliveryFailurePolicy(
+        DeliveryFailurePolicy.reportAndContinue[IO](_ => reports.update(_ + 1))
+      )
+      _ <- Pipeline.resource(plan).use { factory =>
+        val logger  = factory.getLoggerFromName("strict-construction")
+        val encoder = new Encoder[Int] { def encode[V](value: Int)(out: ValueEncoding[V]): V = throw error }
+        for {
+          callback <- logger.log(Level.Info, None, _ => throw error).attempt
+          encoding <- logger.log(Level.Info, None, _.field("broken", 1)(encoder)).attempt
+          _ <- IO {
+            assertEquals(callback, Left(error): Either[Throwable, Unit])
+            assertEquals(encoding, Left(error): Either[Throwable, Unit])
+          }
+        } yield ()
+      }
+      context <- Pipeline
+        .resource(plan, ContextSource.fromFields(IO.raiseError[Fields](error)))
+        .use(_.getLoggerFromName("strict-context").info("event"))
+        .attempt
+      reported  <- reports.get
+      delivered <- emissions.get
+    } yield {
+      assertEquals(context, Left(error): Either[Throwable, Unit])
+      assertEquals(reported, 0)
+      assertEquals(delivered, 0)
+    }
+  }
+
+  test("self-canceling delivery still terminates the worker without reporting it as an error") {
+    import org.typelevel.log4cats.experimental.pipeline.internal.AsyncDeliveryQueue
+    for {
+      reports <- Ref.of[IO, Int](0)
+      backend = ValueBackend[IO](_ => IO.canceled, IO.unit, (_, _) => IO.pure(true))
+      allocated <- Pipeline
+        .runtimeResource(
+          output(backend)
+            .async(1)
+            .withDeliveryFailurePolicy(DeliveryFailurePolicy.reportAndContinue[IO](_ => reports.update(_ + 1)))
+        )
+        .allocated
+      (runtime, close) = allocated
+      _        <- runtime.getLoggerFromName("canceling").info("event")
+      flushed  <- runtime.flush.attempt
+      closed   <- close.attempt
+      reported <- reports.get
+    } yield {
+      assert(flushed.swap.exists(_.isInstanceOf[AsyncDeliveryQueue.WorkerCanceled]))
+      assert(closed.swap.exists(_.isInstanceOf[AsyncDeliveryQueue.WorkerCanceled]))
+      assertEquals(reported, 0)
+    }
+  }
 }
