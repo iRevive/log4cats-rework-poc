@@ -78,14 +78,18 @@ structured values coexist. Event-name metadata overrides an `event.name` structu
 emitted only as a key-value pair; explicit MDC `event.name` remains independent.
 
 Structured fields go only to native key-value pairs, and diagnostic values go only to native MDC.
-MDC-aware checks and emission save, replace, and restore thread MDC in a `finally` block. Existing
-thread entries are hidden during those actions. Both actions run in `F.delay`, without a blocking-pool
-boundary, so providers and appenders run on the calling thread. SLF4J supplies the timestamp; this
+MDC-aware checks and emission save and restore thread MDC in a `finally` block.
+`Slf4j.Config.mdcPolicy` defaults to `MdcPolicy.Isolate`, replacing thread MDC during those actions.
+`MdcPolicy.Overlay` retains thread entries and writes logical MDC over matching keys. Both restore
+the full previous map, including after native failure. Overlay reads thread state at each action;
+prepared and async delivery do not capture producer thread MDC. Both actions run in `F.delay`,
+without a blocking-pool boundary, so providers and appenders run on the calling thread. SLF4J supplies the timestamp; this
 path reads no clock.
 
 The SLF4J Native policy calls `isEnabledForLevel` without changing native thread state. A provider
 may still run filters consulting thread MDC. The default MdcAware policy installs captured logical
-MDC and restores thread MDC afterward. Neither forwards event-name metadata to native acceptance.
+MDC according to the configured isolation/overlay policy and restores thread MDC afterward.
+Neither forwards event-name metadata to native acceptance.
 `Slf4j.factory` and `Slf4jBackend.acquire` both accept the explicit policy.
 
 ## Direct OTel logging

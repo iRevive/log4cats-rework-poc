@@ -191,46 +191,119 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
     }
   }
 
-  test("MDC excludes unrelated thread state and restores it after success and native failure") {
+  List(Slf4j.MdcPolicy.Isolate, Slf4j.MdcPolicy.Overlay).foreach { policy =>
+    test(s"MDC $policy handles collisions and restores thread state after success and native failure") {
+      recording.use { case (native, appender) =>
+        IO {
+          val previous = org.slf4j.MDC.getCopyOfContextMap
+          try {
+            org.slf4j.MDC.clear()
+            org.slf4j.MDC.put("host", "retained")
+            org.slf4j.MDC.put("request.id", "thread")
+            val before = Map("host" -> "retained", "request.id" -> "thread")
+            val expected = policy match {
+              case Slf4j.MdcPolicy.Isolate => Map("request.id" -> "req-42")
+              case Slf4j.MdcPolicy.Overlay => before.updated("request.id", "req-42")
+            }
+            val context = ContextSource.const[SyncIO](LogContext(mdc = Mdc("request.id" -> "req-42")))
+            val config  = Slf4j.Config(native = native, mdcPolicy = policy)
+            val logger  = Slf4j.factory[SyncIO](context, config).getLoggerFromName("restoration")
+            logger.info("success").unsafeRunSync()
+            assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, before)
+            assertEquals(appender.list.get(0).getMDCPropertyMap.asScala.toMap, expected)
+            // Empty logical MDC still respects isolation versus overlay.
+            Slf4j.factory[SyncIO](config).getLoggerFromName("empty").info("empty").unsafeRunSync()
+            assertEquals(
+              appender.list.get(1).getMDCPropertyMap.asScala.toMap,
+              if (policy == Slf4j.MdcPolicy.Overlay) before else Map.empty[String, String]
+            )
+            assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, before)
+
+            List("isEnabledForLevel", "atLevel").foreach { failAt =>
+              val failure  = new RuntimeException(s"native failure at $failAt")
+              val delegate = native.getLogger("failure")
+              val throwing = java.lang.reflect.Proxy
+                .newProxyInstance(
+                  classOf[org.slf4j.Logger].getClassLoader,
+                  Array(classOf[org.slf4j.Logger]),
+                  new java.lang.reflect.InvocationHandler {
+                    def invoke(proxy: AnyRef, method: java.lang.reflect.Method, args: Array[AnyRef]): AnyRef = {
+                      assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, expected)
+                      if (method.getName == failAt) {
+                        org.slf4j.MDC.put("native.extra", "temporary")
+                        throw failure
+                      }
+                      method.invoke(delegate, Option(args).getOrElse(Array.empty[AnyRef]): _*)
+                    }
+                  }
+                )
+                .asInstanceOf[org.slf4j.Logger]
+              val throwingFactory = new org.slf4j.ILoggerFactory {
+                def getLogger(name: String): org.slf4j.Logger = throwing
+              }
+              val failed = Slf4j
+                .factory[SyncIO](context, config.copy(native = throwingFactory))
+                .getLoggerFromName("failure")
+                .info("failure")
+                .attempt
+                .unsafeRunSync()
+              assert(failed.swap.exists(_ eq failure))
+              assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, before)
+            }
+            org.slf4j.MDC.clear()
+            logger.info("initially empty").unsafeRunSync()
+            assert(Option(org.slf4j.MDC.getCopyOfContextMap).forall(_.isEmpty))
+          } finally
+            if (previous == null) org.slf4j.MDC.clear() else org.slf4j.MDC.setContextMap(previous)
+        }
+      }
+    }
+  }
+
+  test("overlay exposes thread MDC to MDC-aware filters and restores it on rejection") {
     recording.use { case (native, appender) =>
       IO {
         val previous = org.slf4j.MDC.getCopyOfContextMap
         try {
           org.slf4j.MDC.clear()
-          org.slf4j.MDC.put("host", "retained")
-          val context = ContextSource.const[SyncIO](LogContext(mdc = Mdc("request.id" -> "req-42")))
-          val factory = Slf4j.factory[SyncIO](context, Slf4j.Config(native = native))
-          val logger  = factory.getLoggerFromName("restoration")
-          logger.info("success").unsafeRunSync()
-          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "retained"))
-          assertEquals(appender.list.get(0).getMDCPropertyMap.asScala.toMap, Map("request.id" -> "req-42"))
-          val failure  = new RuntimeException("native failure")
-          val delegate = native.getLogger("failure")
-          val throwing = java.lang.reflect.Proxy
-            .newProxyInstance(
-              classOf[org.slf4j.Logger].getClassLoader,
-              Array(classOf[org.slf4j.Logger]),
-              new java.lang.reflect.InvocationHandler {
-                def invoke(proxy: AnyRef, method: java.lang.reflect.Method, args: Array[AnyRef]): AnyRef = {
-                  assertEquals(org.slf4j.MDC.get("request.id"), "req-42")
-                  assertEquals(org.slf4j.MDC.get("host"), null)
-                  if (method.getName == "atLevel") throw failure
-                  method.invoke(delegate, Option(args).getOrElse(Array.empty[AnyRef]): _*)
-                }
-              }
-            )
-            .asInstanceOf[org.slf4j.Logger]
-          val throwingFactory = new org.slf4j.ILoggerFactory {
-            def getLogger(name: String): org.slf4j.Logger = throwing
-          }
-          val failed = Slf4j
-            .factory[SyncIO](context, Slf4j.Config(native = throwingFactory))
-            .getLoggerFromName("failure")
-            .info("failure")
-            .attempt
+          org.slf4j.MDC.put("legacy", "accepted")
+          native.addTurboFilter(new ch.qos.logback.classic.turbo.TurboFilter {
+            override def decide(
+                marker: org.slf4j.Marker,
+                logger: ch.qos.logback.classic.Logger,
+                level: NativeLevel,
+                format: String,
+                params: Array[AnyRef],
+                error: Throwable
+            ): ch.qos.logback.core.spi.FilterReply =
+              if (org.slf4j.MDC.get("legacy") == "accepted") ch.qos.logback.core.spi.FilterReply.ACCEPT
+              else ch.qos.logback.core.spi.FilterReply.DENY
+          })
+          val source  = ContextSource.const[SyncIO](LogContext(mdc = Mdc("request.id" -> "logical")))
+          val config  = Slf4j.Config(native = native, mdcPolicy = Slf4j.MdcPolicy.Overlay)
+          val overlay = Slf4j.factory[SyncIO](source, config).getLoggerFromName("overlay")
+          val isolated = Slf4j
+            .factory[SyncIO](source, config.copy(mdcPolicy = Slf4j.MdcPolicy.Isolate))
+            .getLoggerFromName("isolated")
+          var builds = 0
+          isolated.info { builds += 1; "rejected" }.unsafeRunSync()
+          assertEquals(builds, 0)
+          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("legacy" -> "accepted"))
+          val rejectedSource = ContextSource.const[SyncIO](LogContext(mdc = Mdc("legacy" -> "denied")))
+          Slf4j
+            .factory[SyncIO](rejectedSource, config)
+            .getLoggerFromName("overlay-rejected")
+            .info { builds += 1; "rejected" }
             .unsafeRunSync()
-          assert(failed.swap.exists(_ eq failure))
-          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "retained"))
+          assertEquals(builds, 0)
+          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("legacy" -> "accepted"))
+          overlay.info("accepted").unsafeRunSync()
+          assertEquals(appender.list.size(), 1)
+          assertEquals(
+            appender.list.get(0).getMDCPropertyMap.asScala.toMap,
+            Map("legacy" -> "accepted", "request.id" -> "logical")
+          )
+          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("legacy" -> "accepted"))
         } finally
           if (previous == null) org.slf4j.MDC.clear() else org.slf4j.MDC.setContextMap(previous)
       }

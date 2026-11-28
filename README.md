@@ -78,7 +78,23 @@ and `fromContextAsk` adapts `Ask[F, LogContext]`. Combine sources with `++`: rea
 right and later values win independently in each channel. Each reader runs once per logging execution.
 Per-call values override ambient values within their channel. SLF4J installs ambient MDC for early
 native enablement; per-call MDC is available during emission, after record construction.
-Unrelated thread MDC entries are excluded during logging and restored afterward.
+By default, `Slf4j.MdcPolicy.Isolate` hides unrelated thread MDC during MDC-aware checks and
+emission. For legacy integrations, opt into overlay:
+
+```scala
+val config = Slf4j.Config(mdcPolicy = Slf4j.MdcPolicy.Overlay)
+val factory = Slf4j.factory[IO](source, config)
+```
+
+Overlay retains existing thread entries; logical MDC wins collisions, with per-call MDC winning
+over ambient MDC during emission. Both policies restore the complete previous thread MDC after
+success or failure. `Enablement.Native` still checks existing thread state without installing logical
+MDC; the MDC policy applies when emitting.
+
+The same config works with `Slf4jBackend.acquire[IO](config)`. Overlay uses thread MDC at each
+check or delivery, including prepared replay and async delivery; it does not capture producer
+thread MDC. Use explicit logical MDC to carry values across fibers and queues. Overlay can include
+stale or unrelated entries from the current thread, so isolation remains the default.
 
 The optional runtime's `ScopedContext` supplies fiber-local scopes for both channels via
 `withMdc`, `withFields`, or `scope(LogContext(...))`, and exposes a `source` for either direct factories

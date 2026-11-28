@@ -9,8 +9,21 @@ object Slf4j {
 
   final case class Config(
       native: ILoggerFactory = JLoggerFactory.getILoggerFactory,
-      enablement: Enablement = Enablement.MdcAware
+      enablement: Enablement = Enablement.MdcAware,
+      mdcPolicy: MdcPolicy = MdcPolicy.Isolate
   )
+
+  /** Controls how logical MDC interacts with existing native thread MDC. */
+  sealed trait MdcPolicy
+
+  object MdcPolicy {
+
+    /** Hide existing thread entries during MDC-aware checks and emission. */
+    case object Isolate extends MdcPolicy
+
+    /** Retain thread entries, with logical MDC winning collisions. */
+    case object Overlay extends MdcPolicy
+  }
 
   /** Selects which context is available during early native acceptance checks. */
   sealed trait Enablement
@@ -37,6 +50,6 @@ object Slf4j {
     new LoggerFactory[F] {
       def fromName(name: String): F[Logger[F]] = F.delay(getLoggerFromName(name))
       def getLoggerFromName(name: String): Logger[F] =
-        new Slf4jLogger[F](config.native.getLogger(Scope(name).name), context, config.enablement)
+        new Slf4jLogger[F](config.native.getLogger(Scope(name).name), context, config.enablement, config.mdcPolicy)
     }
 }
