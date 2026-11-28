@@ -417,4 +417,158 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
     }
   }
 
+  test("scoped logging captures once per execution, emits synchronously, and preserves both channels") {
+    recording.use { case (native, appender) =>
+      var version = 1
+      for {
+        reads <- Ref.of[IO, Int](0)
+        local <- IOLocal(LogContext(Mdc("request.id" -> "first"), Fields(Field("request.id", 1))))
+        source = ContextSource(reads.update(_ + 1) *> local.get.map { context =>
+          context ++ LogContext(fields = Fields(Field("version", version)))
+        })
+        logging = Slf4j.scopedLogging[IO](source, Slf4j.Config(native = native))
+        effect = logging.use("scoped") { logger =>
+          val before = appender.list.size()
+          logger.infoEvent("scoped.started")(
+            Event
+              .message("start")
+              .withField("request.id", 42)
+              .withMdc("request.id", "call")
+              .withField("event.name", "ignored")
+          )
+          assertEquals(appender.list.size(), before + 1)
+          version += 1
+          logger.info("finish")
+          assertEquals(appender.list.size(), before + 2)
+          42
+        }
+        before <- reads.get
+        first  <- effect
+        _      <- local.set(LogContext(Mdc("request.id" -> "second"), Fields(Field("request.id", 2))))
+        second <- effect
+        total  <- reads.get
+      } yield {
+        assertEquals(before, 0)
+        assertEquals(total, 2)
+        assertEquals((first, second), (42, 42))
+        val events = appender.list.asScala.toVector
+        assertEquals(events.map(_.getMDCPropertyMap.get("request.id")), Vector("call", "first", "call", "second"))
+        val fields = events.map(_.getKeyValuePairs.asScala.map(kv => kv.key -> kv.value).toMap)
+        assertEquals(fields.map(_("version")), Vector(1L, 1L, 2L, 2L).map(java.lang.Long.valueOf))
+        assertEquals(fields.map(_("request.id")), Vector(42L, 1L, 42L, 2L).map(java.lang.Long.valueOf))
+        assertEquals(fields.head("event.name"), "scoped.started")
+        assert(events.forall(_.getMDCPropertyMap.get("event.name") == null))
+      }
+    }
+  }
+
+  List(Slf4j.Enablement.MdcAware, Slf4j.Enablement.Native).foreach { enablement =>
+    test(s"scoped $enablement calls recheck levels and skip disabled record construction and encoding") {
+      recording.use { case (native, appender) =>
+        val name         = classOf[String].getName
+        val delegate     = native.getLogger(name)
+        val cause        = new RuntimeException("original cause")
+        var builds       = 0
+        var encodes      = 0
+        var strictCauses = 0
+        val encoder = new Encoder[Int] {
+          def encode[V](value: Int)(out: ValueEncoding[V]): V = { encodes += 1; out.int64(value.toLong) }
+        }
+        delegate.setLevel(NativeLevel.ERROR)
+        Slf4j
+          .scopedLogging[IO](Slf4j.Config(native = native, enablement = enablement))
+          .use(classOf[String]) { logger =>
+            logger.info { builds += 1; "disabled" }
+            logger.info("disabled", { strictCauses += 1; cause })
+            logger.debugEvent { builds += 1; Event.body(42)(encoder) }
+            assertEquals(appender.list.size(), 0)
+            delegate.setLevel(NativeLevel.TRACE)
+            logger.trace { builds += 1; "trace" }
+            logger.debugEvent("enabled")(Event.body(42)(encoder))
+            logger.warn("warn", cause)
+            logger.errorEvent(Event.exception(cause))
+            logger.fatal("fatal")
+          }
+          .map { _ =>
+            assertEquals(builds, 1)
+            assertEquals(strictCauses, 1)
+            assertEquals(encodes, 1)
+            val events = appender.list.asScala.toVector
+            assertEquals(
+              events.map(_.getLevel),
+              Vector(NativeLevel.TRACE, NativeLevel.DEBUG, NativeLevel.WARN, NativeLevel.ERROR, NativeLevel.ERROR)
+            )
+            assert(events.forall(_.getLoggerName == name))
+            assert(events(2).getThrowableProxy.asInstanceOf[ThrowableProxy].getThrowable eq cause)
+            assert(events(3).getThrowableProxy.asInstanceOf[ThrowableProxy].getThrowable eq cause)
+          }
+      }
+    }
+  }
+
+  List(Slf4j.MdcPolicy.Isolate, Slf4j.MdcPolicy.Overlay).foreach { policy =>
+    test(s"scoped $policy logging restores thread MDC and propagates failure after prior emissions") {
+      recording.use { case (native, appender) =>
+        IO {
+          val previous = org.slf4j.MDC.getCopyOfContextMap
+          try {
+            org.slf4j.MDC.clear()
+            org.slf4j.MDC.put("host", "thread")
+            val source  = ContextSource.const[SyncIO](LogContext(mdc = Mdc("request.id" -> "logical")))
+            val logging = Slf4j.scopedLogging[SyncIO](source, Slf4j.Config(native = native, mdcPolicy = policy))
+            val failure = new RuntimeException("callback failure")
+            val result = logging
+              .use[Unit]("partial") { logger =>
+                logger.info("before failure")
+                assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "thread"))
+                throw failure
+              }
+              .attempt
+              .unsafeRunSync()
+            assertEquals(result, Left(failure): Either[Throwable, Unit])
+            assertEquals(appender.list.size(), 1)
+            val expected =
+              if (policy == Slf4j.MdcPolicy.Overlay)
+                Map("host"          -> "thread", "request.id" -> "logical")
+              else Map("request.id" -> "logical")
+            assertEquals(appender.list.get(0).getMDCPropertyMap.asScala.toMap, expected)
+            assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "thread"))
+          } finally
+            if (previous == null) org.slf4j.MDC.clear() else org.slf4j.MDC.setContextMap(previous)
+        }
+      }
+    }
+  }
+
+  test("scoped context failures skip the callback; encoding failures prevent that record's emission") {
+    recording.use { case (native, appender) =>
+      val failure   = new RuntimeException("source or encoding failure")
+      var callbacks = 0
+      val failing =
+        Slf4j.scopedLogging[IO](ContextSource(IO.raiseError[LogContext](failure)), Slf4j.Config(native = native))
+      val encoder = new Encoder[Int] {
+        def encode[V](value: Int)(out: ValueEncoding[V]): V = throw failure
+      }
+      for {
+        capture <- failing
+          .use("failed") { logger =>
+            callbacks += 1
+            logger.info("unreachable")
+          }
+          .attempt
+        encoded <- Slf4j
+          .scopedLogging[IO](Slf4j.Config(native = native))
+          .use("encoding") { logger =>
+            logger.infoEvent(Event.body(42)(encoder))
+          }
+          .attempt
+      } yield {
+        assertEquals(capture, Left(failure): Either[Throwable, Unit])
+        assertEquals(encoded, Left(failure): Either[Throwable, Unit])
+        assertEquals(callbacks, 0)
+        assertEquals(appender.list.size(), 0)
+      }
+    }
+  }
+
 }
