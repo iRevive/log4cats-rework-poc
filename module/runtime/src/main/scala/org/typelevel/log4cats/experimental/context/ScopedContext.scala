@@ -1,18 +1,22 @@
 package org.typelevel.log4cats.experimental.context
 
+import cats.~>
 import cats.effect.{IO, IOLocal}
 import cats.syntax.all._
-import org.typelevel.log4cats.experimental.{Fields, Mdc}
 
-/** Fiber-local enrichment with separate diagnostic and structured channels. */
-final class ScopedContext private (local: IOLocal[LogContext]) {
-  def current: IO[LogContext]   = local.get
-  def source: ContextSource[IO] = ContextSource(current)
-  def scope[A](context: LogContext)(fa: IO[A]): IO[A] = IO.uncancelable { poll =>
-    local.get.flatMap(old => local.set(old ++ context) *> poll(fa).guarantee(local.set(old)))
+/** Fiber-local LogScope with separate diagnostic and structured channels. */
+final class ScopedContext private (local: IOLocal[LogContext]) extends LogScope[IO] {
+  def current: IO[LogContext] = local.get
+
+  def scope(context: LogContext): IO ~> IO = updateContext(_ ++ context)
+
+  def replaceContext(context: LogContext): IO ~> IO = updateContext(_ => context)
+
+  private def updateContext(update: LogContext => LogContext): IO ~> IO = new (IO ~> IO) {
+    def apply[A](fa: IO[A]): IO[A] = IO.uncancelable { poll =>
+      local.get.flatMap(old => local.set(update(old)) *> poll(fa).guarantee(local.set(old)))
+    }
   }
-  def withMdc[A](mdc: Mdc)(fa: IO[A]): IO[A]          = scope(LogContext(mdc = mdc))(fa)
-  def withFields[A](fields: Fields)(fa: IO[A]): IO[A] = scope(LogContext(fields = fields))(fa)
 }
 
 object ScopedContext {

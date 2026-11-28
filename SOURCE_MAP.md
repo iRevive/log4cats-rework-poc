@@ -38,7 +38,7 @@ the JVM. Dependencies are set in [build.sbt](build.sbt).
 | Shared record construction | [AccumulatingRecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/internal/AccumulatingRecordWriter.scala), [Fields](module/core/src/main/scala/org/typelevel/log4cats/experimental/Fields.scala) | One writer per callback, sealing, and duplicate field names. |
 | Encoding | [Encoder](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/Encoder.scala), [ValueEncoding](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/ValueEncoding.scala), [FieldSink](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/FieldSink.scala) | Domain encoders, backend value construction, and top-level field encoding. |
 | Backend contract | [Backend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Backend.scala), [BoundBackend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/BoundBackend.scala), [Delivery](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Delivery.scala) | Bind a logger name, capture typed backend state, and retain it for delivery. |
-| Context | [ContextSource](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/ContextSource.scala), [LoggingContext](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/LoggingContext.scala), [ScopedFields](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/ScopedFields.scala) | Read and combine fields in core; scope fields with Local or IOLocal in runtime. |
+| Context | [ContextSource](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/ContextSource.scala), [LogScope](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/LogScope.scala), [LoggingContext](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/LoggingContext.scala), [ScopedFields](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/ScopedFields.scala) | Read and scope context through Local in core; allocate IO fiber-local context in runtime. |
 | Async delivery | [AsyncDeliveryQueue](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/internal/AsyncDeliveryQueue.scala) | Bounded admission, worker failure, flush barriers, and shutdown. |
 
 `Logger` has one abstract method, `log(level, eventName, write)`, so it can be implemented with a
@@ -123,12 +123,30 @@ channels. `fromFields(effect)` and `fromMdc(effect)` adapt existing readers. `co
 with later values winning independently in each channel. A failed read stops later reads.
 `map` transforms the two-channel context on each read.
 
-Applications own the carriers read by sources, such as an `IOLocal` or MTL environment. SLF4J does
-not extract telemetry fields automatically. Runtime provides `LoggingContext.withContext` /
-`withMdc` for `Local[F, LogContext]`, and `ScopedContext` for fiber-local two-channel scopes.
-`ScopedContext.source` connects the scoped values to direct factories or pipelines. The field-only
-`LoggingContext.withFields`, `ScopedFields`, and their source adapters remain available.
-`Logger` has no context scoping operation.
+Applications own the carriers read by sources, such as an IOLocal or MTL environment. SLF4J does
+not extract telemetry fields automatically. Core's `LogScope[F]` exposes `current`, `source`,
+and `scope(LogContext): F ~> F`, with `withMdc` and `withFields` conveniences.
+`replaceContext` replaces both channels instead of merging; empty context clears both temporarily.
+`LogScope.fromLocal` wraps an existing `Local[F, LogContext]` purely. Scopes merge against
+the current context on each execution, and the carrier restores the previous context on exit.
+Factories explicitly receive `scope.source`; all loggers reading that carrier share the scopes.
+
+`LogScope[F]` summons the implicit capability. Import
+[`context.syntax._`](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/syntax.scala)
+to add `scope`, `withMdc`, `withFields`, and `replaceContext` to any `F[A]`.
+Effect syntax delegates to the implicit capability and preserves the result type.
+It wraps the entire effect, so in `fa.withMdc(inner).withMdc(outer)`, inner values win.
+Replacement scopes restore the previous context on exit, just like additive scopes.
+
+Runtime's `ScopedContext.create` allocates an IOLocal and implements `LogScope[IO]`. Its scoped
+updates are masked, the user effect is cancelable, and restoration runs on success, failure, or
+cancellation. Children inherit their spawning fiber's context, with subsequent updates isolated.
+Queued records retain the logical context captured during preparation; the capability itself
+does not transport native thread MDC.
+
+`LoggingContext`, `ScopedFields`, and their existing adapters remain available in runtime.
+`Logger` has no context-scoping operation. No generic `mapK` is provided for `LogScope`:
+a one-way effect translation cannot scope an arbitrary effect in the target carrier.
 
 ## Optional runtime: follow one log call
 
@@ -292,6 +310,7 @@ backend action to stop.
 
 | Question | Suite |
 | --- | --- |
+| Do scopes nest, restore, and share ambient context? | [LogScopeSuite](module/core/src/test/scala/org/typelevel/log4cats/experimental/context/LogScopeSuite.scala), [LogScopeSyntaxSuite](module/core/src/test/scala/consumer/LogScopeSyntaxSuite.scala), [ContextSuite](module/runtime/src/test/scala/org/typelevel/log4cats/experimental/context/ContextSuite.scala), [Slf4jFactorySuite](module/slf4j/src/test/scala/consumer/Slf4jFactorySuite.scala) |
 | Do context sources compose and capture lazily? | [ContextSourceSuite](module/core/src/test/scala/org/typelevel/log4cats/experimental/context/ContextSourceSuite.scala) |
 | Does SLF4J work without the runtime? | [Slf4jFactorySuite](module/slf4j/src/test/scala/consumer/Slf4jFactorySuite.scala) |
 | Does direct OTel lookup/context handling work? | [OtelFactorySuite](module/otel/src/test/scala/org/typelevel/log4cats/experimental/otel/OtelFactorySuite.scala) |

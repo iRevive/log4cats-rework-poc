@@ -417,4 +417,48 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
     }
   }
 
+  test("Local-backed LogScope supplies scoped MDC to direct native filters and all connected factories") {
+    import cats.data.Kleisli
+    import org.typelevel.log4cats.experimental.context.LogScope
+    type Reader[A] = Kleisli[IO, LogContext, A]
+    recording.use { case (native, appender) =>
+      native.addTurboFilter(new ch.qos.logback.classic.turbo.TurboFilter {
+        override def decide(
+            marker: org.slf4j.Marker,
+            logger: ch.qos.logback.classic.Logger,
+            level: NativeLevel,
+            format: String,
+            params: Array[AnyRef],
+            error: Throwable
+        ): ch.qos.logback.core.spi.FilterReply =
+          if (org.slf4j.MDC.get("request.id") == "accepted") ch.qos.logback.core.spi.FilterReply.ACCEPT
+          else ch.qos.logback.core.spi.FilterReply.DENY
+      })
+      val scope          = LogScope.fromLocal[Reader]
+      val config         = Slf4j.Config(native = native)
+      val first          = Slf4j.factory[Reader](scope.source, config).getLoggerFromName("first")
+      val second         = Slf4j.factory[Reader](scope.source, config).getLoggerFromName("second")
+      var rejectedBuilds = 0
+      val program = for {
+        _ <- first.info { rejectedBuilds += 1; "rejected before scope" }
+        _ <- scope.scope(LogContext(Mdc("request.id" -> "accepted"), Fields(Field("shared", true)))) {
+          first.info("first") *> second.info("second")
+        }
+        _     <- second.info { rejectedBuilds += 1; "rejected after scope" }
+        after <- scope.current
+      } yield after
+      program.run(LogContext.empty).map { after =>
+        assertEquals(rejectedBuilds, 0)
+        assert(after.mdc.isEmpty)
+        assert(after.fields.isEmpty)
+        val events = appender.list.asScala.toVector
+        assertEquals(events.map(_.getLoggerName), Vector("first", "second"))
+        events.foreach { event =>
+          assertEquals(event.getMDCPropertyMap.asScala.toMap, Map("request.id" -> "accepted"))
+          assertEquals(event.getKeyValuePairs.asScala.find(_.key == "shared").get.value, java.lang.Boolean.TRUE)
+        }
+      }
+    }
+  }
+
 }
