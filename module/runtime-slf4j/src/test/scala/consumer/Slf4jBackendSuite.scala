@@ -11,7 +11,7 @@ import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
 import org.typelevel.log4cats.experimental.Mdc
 import org.typelevel.log4cats.experimental.encoding.{Encoder, ValueEncoding}
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
-import org.typelevel.log4cats.experimental.slf4j.{Slf4jBackend, Slf4jEncoding}
+import org.typelevel.log4cats.experimental.slf4j.{Slf4j, Slf4jBackend, Slf4jEncoding}
 import org.typelevel.log4cats.experimental.{Event, Field, Fields, Level, Scope}
 import scala.collection.JavaConverters._
 
@@ -30,7 +30,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
   }) { case (context, _) => IO(context.stop()) }
 
   private def plan(context: LoggerContext): Pipeline[IO] =
-    Pipeline.fromBackend[IO](Resource.eval(Slf4jBackend.acquire[IO](context)))
+    Pipeline.fromBackend[IO](Resource.eval(Slf4jBackend.acquire[IO](Slf4j.Config(native = context))))
 
   test("SLF4J receives name/class identity, all severities, literal messages, and the original cause") {
     recording.use { case (context, appender) =>
@@ -75,7 +75,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
           context.getLogger(name)
         }
       }
-      Slf4jBackend.acquire[IO](factory).flatMap { backend =>
+      Slf4jBackend.acquire[IO](Slf4j.Config(native = factory)).flatMap { backend =>
         val output = Pipeline.fromBackend[IO](Resource.pure[IO, Backend[IO]](backend))
         Pipeline.resource(output).use { factory =>
           val safe = factory.fromName("safe")
@@ -296,7 +296,7 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
     import org.typelevel.log4cats.experimental.backend.EncodedEvent
     recording.use { case (native, appender) =>
       for {
-        backend <- Slf4jBackend.acquire[IO](native)
+        backend <- Slf4jBackend.acquire[IO](Slf4j.Config(native = native))
         bound   <- backend.bind(Scope("encoded"))
         meta = EventMeta(Level.Info, Scope("encoded"), Some("native.event"), 1L)
         captured <- bound.capture(meta)
@@ -322,6 +322,39 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
           event.getMDCPropertyMap.asScala.toMap,
           Map("id" -> "diagnostic", "event.name" -> "diagnostic.event")
         )
+      }
+    }
+  }
+
+  test("pipeline logging honors the configured native or MDC-aware policy") {
+    import cats.effect.Ref
+    recording.use { case (native, appender) =>
+      native.addTurboFilter(new ch.qos.logback.classic.turbo.TurboFilter {
+        override def decide(
+            marker: org.slf4j.Marker,
+            logger: ch.qos.logback.classic.Logger,
+            level: LogbackLevel,
+            format: String,
+            params: Array[AnyRef],
+            error: Throwable
+        ): ch.qos.logback.core.spi.FilterReply =
+          if (org.slf4j.MDC.get("query.request") == "accepted") ch.qos.logback.core.spi.FilterReply.ACCEPT
+          else ch.qos.logback.core.spi.FilterReply.DENY
+      })
+      for {
+        reads <- Ref.of[IO, Int](0)
+        source = ContextSource(reads.update(_ + 1).as(LogContext(mdc = Mdc("query.request" -> "accepted"))))
+        aware  = Pipeline.fromBackend[IO](Resource.eval(Slf4jBackend.acquire[IO](Slf4j.Config(native = native))))
+        cheap = Pipeline.fromBackend[IO](
+          Resource.eval(Slf4jBackend.acquire[IO](Slf4j.Config(native = native, enablement = Slf4j.Enablement.Native)))
+        )
+        _        <- Pipeline.resource(aware, source).use(_.getLoggerFromName("aware").info("accepted"))
+        _        <- Pipeline.resource(cheap, source).use(_.getLoggerFromName("native").info("rejected"))
+        captured <- reads.get
+      } yield {
+        // The pipeline captures its shared sources before native acceptance, in either mode.
+        assertEquals(captured, 2)
+        assertEquals(appender.events.size(), 1)
       }
     }
   }
