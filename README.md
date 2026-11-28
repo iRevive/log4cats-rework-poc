@@ -96,10 +96,27 @@ check or delivery, including prepared replay and async delivery; it does not cap
 thread MDC. Use explicit logical MDC to carry values across fibers and queues. Overlay can include
 stale or unrelated entries from the current thread, so isolation remains the default.
 
+Loggers can carry static defaults through optional syntax, without a runtime dependency:
+
+```scala
+import org.typelevel.log4cats.experimental.syntax._
+
+val checkout = logger
+  .withFields(Fields(Field("service", "checkout")))
+  .withMdc(Mdc("component" -> "payments"))
+```
+
+Later enrichment wins collisions: `logger.withFields(first).withFields(second)`
+uses `second` for duplicate keys. Per-call values win last, independently in each channel. Defaults are written inside the lazy callback and are not encoded for rejected records.
+`mapK` preserves defaults and their precedence. These defaults take precedence over ambient and
+pipeline defaults because they enter through the record callback. Logger MDC defaults are available
+during emission, after early acceptance; use a `ContextSource` when native filtering needs MDC.
+
+The runtime's `LoggingContext` provides scoping: `withContext` / `withMdc` scope an existing
+`Local[F, LogContext]`, and `withFields` scopes an existing `Local[F, Fields]`.
 The optional runtime's `ScopedContext` supplies fiber-local scopes for both channels via
 `withMdc`, `withFields`, or `scope(LogContext(...))`, and exposes a `source` for either direct factories
-or pipelines. `LoggingContext.withContext` / `withMdc` use an existing `Local[F, LogContext]`.
-The field-only `ScopedFields` and `LoggingContext.withFields` helpers remain available.
+or pipelines. The field-only `ScopedFields` helper also remains in runtime.
 
 ### OpenTelemetry
 

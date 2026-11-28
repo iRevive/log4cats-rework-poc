@@ -38,7 +38,7 @@ the JVM. Dependencies are set in [build.sbt](build.sbt).
 | Shared record construction | [AccumulatingRecordWriter](module/core/src/main/scala/org/typelevel/log4cats/experimental/internal/AccumulatingRecordWriter.scala), [Fields](module/core/src/main/scala/org/typelevel/log4cats/experimental/Fields.scala) | One writer per callback, sealing, and duplicate field names. |
 | Encoding | [Encoder](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/Encoder.scala), [ValueEncoding](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/ValueEncoding.scala), [FieldSink](module/core/src/main/scala/org/typelevel/log4cats/experimental/encoding/FieldSink.scala) | Domain encoders, backend value construction, and top-level field encoding. |
 | Backend contract | [Backend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Backend.scala), [BoundBackend](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/BoundBackend.scala), [Delivery](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/backend/Delivery.scala) | Bind a logger name, capture typed backend state, and retain it for delivery. |
-| Context | [ContextSource](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/ContextSource.scala), [LoggingContext](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/LoggingContext.scala), [ScopedFields](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/ScopedFields.scala) | Read and combine fields in core; scope fields with Local or IOLocal in runtime. |
+| Context | [ContextSource](module/core/src/main/scala/org/typelevel/log4cats/experimental/context/ContextSource.scala), [LoggingContext](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/LoggingContext.scala), [ScopedFields](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/context/ScopedFields.scala) | Read and combine context in core; scope with Local or IOLocal in runtime. |
 | Async delivery | [AsyncDeliveryQueue](module/runtime/src/main/scala/org/typelevel/log4cats/experimental/pipeline/internal/AsyncDeliveryQueue.scala) | Bounded admission, worker failure, flush barriers, and shutdown. |
 
 `Logger` has one abstract method, `log(level, eventName, write)`, so it can be implemented with a
@@ -53,6 +53,19 @@ the supplied implementations defer it until execution and skip it when disabled.
 The [Scala 2 macros](module/core/src/main/scala-2/org/typelevel/log4cats/experimental/LoggerMacro.scala)
 and [Scala 3 inline helpers](module/core/src/main/scala-3/org/typelevel/log4cats/experimental/LoggerMacro.scala)
 implement these helpers. Read them after the logging path.
+
+## Static logger enrichment
+
+[`syntax._`](module/core/src/main/scala/org/typelevel/log4cats/experimental/syntax.scala) adds
+`withFields` and `withMdc` as optional logger extensions.
+Each wrapper prepends defaults inside the lazy callback. Inner callbacks write their defaults first,
+so `logger.withFields(first).withFields(second)` uses `second` for duplicate keys.
+Per-call values win last, and both channels override ambient/pipeline defaults. This happens only
+if the backend invokes the callback. Logger MDC defaults do not participate in early native checks.
+
+`mapK` translates the complete wrapped operation without inspecting enrichment wrappers.
+The same callback ordering applies across effect translations and other delegating wrappers.
+`Logger` retains one abstract method and needs no effect typeclass for enrichment.
 
 ## Direct SLF4J logging
 
@@ -125,9 +138,10 @@ with later values winning independently in each channel. A failed read stops lat
 
 Applications own the carriers read by sources, such as an `IOLocal` or MTL environment. SLF4J does
 not extract telemetry fields automatically. Runtime provides `LoggingContext.withContext` /
-`withMdc` for `Local[F, LogContext]`, and `ScopedContext` for fiber-local two-channel scopes.
-`ScopedContext.source` connects the scoped values to direct factories or pipelines. The field-only
-`LoggingContext.withFields`, `ScopedFields`, and their source adapters remain available.
+`withMdc` for `Local[F, LogContext]` and `LoggingContext.withFields` for `Local[F, Fields]`.
+Runtime provides `ScopedContext` for fiber-local two-channel scopes; its `source` connects
+scoped values to direct factories or pipelines. The field-only `ScopedFields` and its source
+adapter also remain in runtime.
 `Logger` has no context scoping operation.
 
 ## Optional runtime: follow one log call
