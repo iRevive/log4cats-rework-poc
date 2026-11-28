@@ -21,7 +21,12 @@ object Slf4jBackend {
     F.pure(new Backend[F] {
       def bind(scope: Scope): F[BoundBackend[F]] = F.delay(bindUnsafe(scope))
       def bindUnsafe(scope: Scope): BoundBackend[F] = {
-        val logger = new Slf4jLogger[F](config.native.getLogger(scope.name), ContextSource.empty[F], config.enablement)
+        val logger = new Slf4jLogger[F](
+          config.native.getLogger(scope.name),
+          ContextSource.empty[F],
+          config.enablement,
+          config.mdcPolicy
+        )
         new BoundBackend[F] {
           type Context = Unit
           type Repr    = AnyRef

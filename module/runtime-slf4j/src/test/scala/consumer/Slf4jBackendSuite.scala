@@ -1,6 +1,6 @@
 package consumer
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Resource, SyncIO}
 import cats.syntax.all._
 import ch.qos.logback.classic.spi.ThrowableProxy
 import ch.qos.logback.classic.{Level => LogbackLevel, LoggerContext}
@@ -358,4 +358,80 @@ final class Slf4jBackendSuite extends CatsEffectSuite {
       }
     }
   }
+  test("overlay uses delivery-time thread MDC for prepared replay and encoded emission") {
+    import org.typelevel.log4cats.experimental.backend.EncodedEvent
+    implicit val console: cats.effect.std.Console[SyncIO] = new cats.effect.std.Console[SyncIO] {
+      private def unexpected[A]: SyncIO[A] = SyncIO.raiseError(new AssertionError("unexpected console use"))
+      def readLineWithCharset(charset: java.nio.charset.Charset): SyncIO[String] = unexpected
+      def print[A](a: A)(implicit S: cats.Show[A]): SyncIO[Unit]                 = unexpected
+      def println[A](a: A)(implicit S: cats.Show[A]): SyncIO[Unit]               = unexpected
+      def error[A](a: A)(implicit S: cats.Show[A]): SyncIO[Unit]                 = unexpected
+      def errorln[A](a: A)(implicit S: cats.Show[A]): SyncIO[Unit]               = unexpected
+    }
+    recording.use { case (native, appender) =>
+      IO {
+        val previous = org.slf4j.MDC.getCopyOfContextMap
+        try {
+          org.slf4j.MDC.clear()
+          org.slf4j.MDC.put("legacy", "producer")
+          val config = Slf4j.Config(native = native, mdcPolicy = Slf4j.MdcPolicy.Overlay)
+          val plan = Pipeline
+            .fromBackend[SyncIO](Resource.eval(Slf4jBackend.acquire[SyncIO](config)))
+            .withMdc(Mdc("id" -> "default"))
+          Pipeline
+            .runtimeResource(plan)
+            .use { runtime =>
+              for {
+                prepared <- runtime.prepare(Scope("prepared-overlay"), Level.Info, None) { writer =>
+                  writer.mdc("id", "call")
+                }
+                _ <- SyncIO {
+                  assert(appender.events.isEmpty)
+                  org.slf4j.MDC.put("legacy", "delivery")
+                  org.slf4j.MDC.put("id", "thread")
+                }
+                _ <- prepared.deliver
+                _ <- SyncIO {
+                  assertEquals(
+                    org.slf4j.MDC.getCopyOfContextMap.asScala.toMap,
+                    Map("legacy" -> "delivery", "id" -> "thread")
+                  )
+                  org.slf4j.MDC.put("legacy", "replay")
+                }
+                _ <- prepared.deliver
+              } yield ()
+            }
+            .unsafeRunSync()
+          val backend  = Slf4jBackend.acquire[SyncIO](config).unsafeRunSync()
+          val bound    = backend.bind(Scope("encoded-overlay")).unsafeRunSync()
+          val meta     = EventMeta(Level.Info, Scope("encoded-overlay"), None, 1L)
+          val captured = bound.capture(meta).unsafeRunSync()
+          bound
+            .emit(
+              EncodedEvent[bound.Repr](
+                meta,
+                bound.encoding.text("encoded"),
+                bound.encoding.obj().result(),
+                None,
+                Mdc("id" -> "encoded")
+              ),
+              captured
+            )
+            .unsafeRunSync()
+          val events = appender.events.asScala.toVector
+          assertEquals(
+            events.map(_.getMDCPropertyMap.asScala.toMap),
+            Vector(
+              Map("legacy" -> "delivery", "id" -> "call"),
+              Map("legacy" -> "replay", "id"   -> "call"),
+              Map("legacy" -> "replay", "id"   -> "encoded")
+            )
+          )
+          assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("legacy" -> "replay", "id" -> "thread"))
+        } finally
+          if (previous == null) org.slf4j.MDC.clear() else org.slf4j.MDC.setContextMap(previous)
+      }
+    }
+  }
+
 }

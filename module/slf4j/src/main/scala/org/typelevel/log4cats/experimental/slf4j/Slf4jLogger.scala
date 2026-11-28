@@ -12,7 +12,8 @@ import scala.collection.JavaConverters._
 private[experimental] final class Slf4jLogger[F[_]](
     native: Logger,
     context: ContextSource[F],
-    enablement: Slf4j.Enablement = Slf4j.Enablement.MdcAware
+    enablement: Slf4j.Enablement = Slf4j.Enablement.MdcAware,
+    mdcPolicy: Slf4j.MdcPolicy = Slf4j.MdcPolicy.Isolate
 )(implicit F: Sync[F])
     extends org.typelevel.log4cats.experimental.Logger[F] {
   def log(level: Level, eventName: Option[String], write: RecordWriter => Unit): F[Unit] = {
@@ -119,7 +120,10 @@ private[experimental] final class Slf4jLogger[F[_]](
   private def withMdc[A](fields: Map[String, String])(use: => A): A = {
     val previous = MDC.getCopyOfContextMap
     try {
-      MDC.setContextMap(fields.asJava)
+      mdcPolicy match {
+        case Slf4j.MdcPolicy.Isolate => MDC.setContextMap(fields.asJava)
+        case Slf4j.MdcPolicy.Overlay => fields.foreach { case (key, value) => MDC.put(key, value) }
+      }
       use
     } finally
       if (previous == null) MDC.clear() else MDC.setContextMap(previous)
