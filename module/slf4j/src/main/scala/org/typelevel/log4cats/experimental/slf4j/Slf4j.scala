@@ -1,8 +1,17 @@
 package org.typelevel.log4cats.experimental.slf4j
 
 import cats.effect.Sync
+import cats.syntax.all._
 import org.slf4j.{ILoggerFactory, LoggerFactory => JLoggerFactory}
-import org.typelevel.log4cats.experimental.{Logger, LoggerFactory, Scope}
+import org.typelevel.log4cats.experimental.{
+  Level,
+  Logger,
+  LoggerFactory,
+  RecordWriter,
+  Scope,
+  ScopedLogger,
+  ScopedLogging
+}
 import org.typelevel.log4cats.experimental.context.ContextSource
 
 object Slf4j {
@@ -52,4 +61,28 @@ object Slf4j {
       def getLoggerFromName(name: String): Logger[F] =
         new Slf4jLogger[F](config.native.getLogger(Scope(name).name), context, config.enablement, config.mdcPolicy)
     }
+
+  def scopedLogging[F[_]: Sync]: ScopedLogging[F] =
+    scopedLogging(Config())
+
+  def scopedLogging[F[_]: Sync](config: Config): ScopedLogging[F] =
+    scopedLogging(ContextSource.empty[F], config)
+
+  def scopedLogging[F[_]](context: ContextSource[F], config: Config = Config())(implicit
+      F: Sync[F]
+  ): ScopedLogging[F] = new ScopedLogging[F] {
+    def use[A](name: String)(f: ScopedLogger => A): F[A] =
+      F.delay(new Slf4jEmitter(config.native.getLogger(Scope(name).name), config.enablement, config.mdcPolicy))
+        .flatMap { emitter =>
+          F.defer(context.current).flatMap { captured =>
+            F.delay {
+              f(new ScopedLogger {
+                def log(level: Level, eventName: Option[String], write: RecordWriter => Unit): Unit =
+                  emitter.log(captured, level, eventName, write)
+              })
+            }
+          }
+        }
+  }
+
 }

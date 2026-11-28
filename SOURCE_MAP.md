@@ -92,6 +92,15 @@ MDC according to the configured isolation/overlay policy and restores thread MDC
 Neither forwards event-name metadata to native acceptance.
 `Slf4j.factory` and `Slf4jBackend.acquire` both accept the explicit policy.
 
+## Synchronous scoped logging
+
+[`ScopedLogging`](module/core/src/main/scala/org/typelevel/log4cats/experimental/ScopedLogging.scala)
+provides `use(name)(ScopedLogger => A): F[A]`; `ScopedLogger` extends `Logger[Id]`.
+`mapK` translates the enclosing effect. SLF4J captures context once per callback in `F.delay`.
+Ordinary, scoped, and runtime delivery share
+[`Slf4jEmitter`](module/slf4j/src/main/scala/org/typelevel/log4cats/experimental/slf4j/Slf4jEmitter.scala),
+including acceptance checks, encoding, and MDC restoration.
+
 ## Direct OTel logging
 
 [Otel.resource](module/otel/src/main/scala/org/typelevel/log4cats/experimental/otel/Otel.scala)
@@ -293,6 +302,7 @@ backend action to stop.
 | Question | Suite |
 | --- | --- |
 | Do context sources compose and capture lazily? | [ContextSourceSuite](module/core/src/test/scala/org/typelevel/log4cats/experimental/context/ContextSourceSuite.scala) |
+| Does the scoped capability preserve suspension and effect translation? | [ScopedLoggingSuite](module/core/src/test/scala/consumer/ScopedLoggingSuite.scala), [Slf4jFactorySuite](module/slf4j/src/test/scala/consumer/Slf4jFactorySuite.scala) |
 | Does SLF4J work without the runtime? | [Slf4jFactorySuite](module/slf4j/src/test/scala/consumer/Slf4jFactorySuite.scala) |
 | Does direct OTel lookup/context handling work? | [OtelFactorySuite](module/otel/src/test/scala/org/typelevel/log4cats/experimental/otel/OtelFactorySuite.scala) |
 | Do helpers work from consumer code and defer messages/events? | [InlineFrontendSuite](module/core/src/test/scala/consumer/InlineFrontendSuite.scala) |

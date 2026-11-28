@@ -35,6 +35,20 @@ Both direct integrations and the runtime use these lookup methods:
 | `fromName` / `fromClass` | `F[Logger[F]]` |
 | `getLoggerFromName` / `getLoggerFromClass` | `Logger[F]` |
 
+### Synchronous scoped logging
+
+```scala
+val logging = Slf4j.scopedLogging[IO](source)
+val result: IO[Int] = logging.use("checkout") { logger =>
+  logger.info("calculating")
+  42
+}
+```
+
+The callback runs inside `F` with one captured context. Logging returns `Unit` and checks native
+acceptance on each call. Keep the logger inside the synchronous callback. Failures propagate;
+earlier emissions remain. The same `Slf4j.Config` options apply.
+
 ### SLF4J acceptance checks
 
 SLF4J defaults to `Slf4j.Enablement.MdcAware`: read logical context and install its MDC for the
