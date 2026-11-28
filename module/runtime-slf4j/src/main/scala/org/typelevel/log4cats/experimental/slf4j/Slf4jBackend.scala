@@ -1,8 +1,6 @@
 package org.typelevel.log4cats.experimental.slf4j
 
 import cats.effect.Sync
-import cats.syntax.all._
-import org.slf4j.{ILoggerFactory, LoggerFactory => JLoggerFactory}
 import org.typelevel.log4cats.experimental.backend.{
   Backend,
   BoundBackend,
@@ -17,21 +15,21 @@ import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
 
 object Slf4jBackend {
   def acquire[F[_]](implicit F: Sync[F]): F[Backend[F]] =
-    F.delay(JLoggerFactory.getILoggerFactory).flatMap(factory => acquire[F](factory))
+    F.defer(acquire[F](Slf4j.Config()))
 
-  def acquire[F[_]](factory: ILoggerFactory)(implicit F: Sync[F]): F[Backend[F]] =
+  def acquire[F[_]](config: Slf4j.Config)(implicit F: Sync[F]): F[Backend[F]] =
     F.pure(new Backend[F] {
       def bind(scope: Scope): F[BoundBackend[F]] = F.delay(bindUnsafe(scope))
       def bindUnsafe(scope: Scope): BoundBackend[F] = {
-        val logger = new Slf4jLogger[F](factory.getLogger(scope.name), ContextSource.empty[F])
+        val logger = new Slf4jLogger[F](config.native.getLogger(scope.name), ContextSource.empty[F], config.enablement)
         new BoundBackend[F] {
           type Context = Unit
           type Repr    = AnyRef
           val encoding: ValueEncoding[AnyRef]                     = Slf4jEncoding.native
           def capture(meta: EventMeta): F[Unit]                   = F.pure(())
-          def accepts(meta: EventMeta, context: Unit): F[Boolean] = logger.isEnabled(meta.level)
+          def accepts(meta: EventMeta, context: Unit): F[Boolean] = logger.accepts(meta.level)
           override def acceptsWithContext(meta: EventMeta, context: Unit, data: LogContext): F[Boolean] =
-            logger.isEnabled(meta.level, data.mdc)
+            logger.accepts(meta.level, data.mdc)
           override protected def prepareOutput(event: CapturedEvent, context: Unit)(implicit
               S: Sync[F]
           ): F[Delivery[F]] =

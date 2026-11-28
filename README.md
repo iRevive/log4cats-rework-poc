@@ -23,7 +23,7 @@ for {
 } yield ()
 ```
 
-`Slf4j.factory` returns `LoggerFactory[F]` and can take an explicit `org.slf4j.ILoggerFactory`.
+`Slf4j.factory` returns `LoggerFactory[F]` and accepts a nested `Slf4j.Config` for the native factory and acceptance policy.
 Each logger retains its native SLF4J handle and checks the provider's level configuration when the
 logging effect runs. SLF4J controls timestamps and output configuration. Native checks and emission
 run in `F.delay` on the calling thread.
@@ -34,6 +34,23 @@ Both direct integrations and the runtime use these lookup methods:
 | --- | --- |
 | `fromName` / `fromClass` | `F[Logger[F]]` |
 | `getLoggerFromName` / `getLoggerFromClass` | `Logger[F]` |
+
+### SLF4J acceptance checks
+
+SLF4J defaults to `Slf4j.Enablement.MdcAware`: read logical context and install its MDC for the
+native check. To avoid those operations on disabled direct calls:
+
+```scala
+val factory = Slf4j.factory[IO](source, Slf4j.Config(enablement = Slf4j.Enablement.Native))
+```
+
+`Native` calls the provider with existing thread state. It does not read logical context or install
+MDC during checks; enabled logging still captures context for emission. Provider filters may still
+run, so this is not a provider-independent threshold lookup. Use the default when native filtering
+needs logical MDC. SLF4J's early native check does not receive event-name metadata or per-call fields.
+
+Choosing Native for a pipeline backend changes its native gate; it does not skip the pipeline's
+shared context capture. Configure it with `Slf4jBackend.acquire[IO](Slf4j.Config(enablement = Slf4j.Enablement.Native))`.
 
 ### Diagnostic context and structured fields
 

@@ -40,7 +40,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         def getLogger(name: String): org.slf4j.Logger = { lookups += 1; context.getLogger(name) }
       }
       context.getLogger("restricted").setLevel(NativeLevel.ERROR)
-      val factory = Slf4j.factory[IO](native)
+      val factory = Slf4j.factory[IO](Slf4j.Config(native = native))
       val safe    = factory.fromName("restricted")
       for {
         _       <- IO(assertEquals(lookups, 0))
@@ -68,7 +68,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
   test("direct logging preserves named structured fields, literal messages, and throwable identity") {
     recording.use { case (context, appender) =>
       val cause   = new IllegalStateException("original")
-      val factory = Slf4j.factory[IO](context)
+      val factory = Slf4j.factory[IO](Slf4j.Config(native = context))
       for {
         logger <- factory.fromName("checkout")
         _ <- logger.infoEvent("checkout.completed") {
@@ -95,7 +95,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
       val broken = new Encoder[Int] {
         def encode[V](value: Int)(out: ValueEncoding[V]): V = throw failure
       }
-      val factory = Slf4j.factory[IO](context)
+      val factory = Slf4j.factory[IO](Slf4j.Config(native = context))
       for {
         logger <- factory.fromName("replay")
         effect = logger.info { builds += 1; "replayed" }
@@ -125,7 +125,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
           )
         ) ++
           ContextSource.const[IO](Fields(Field("service", "checkout")))
-        factory = Slf4j.factory[IO](native, source)
+        factory = Slf4j.factory[IO](source, Slf4j.Config(native = native))
         logger <- factory.fromName("contextual")
         effect = logger.infoEvent("checkout.completed") {
           Event.message("complete").withField("attempt", 2)
@@ -172,12 +172,17 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
           ) ch.qos.logback.core.spi.FilterReply.ACCEPT
           else ch.qos.logback.core.spi.FilterReply.DENY
       })
-      var builds  = 0
-      val factory = Slf4j.factory[IO](native, ContextSource.const[IO](LogContext(mdc = Mdc("request.id" -> "req-42"))))
+      var builds = 0
+      val factory = Slf4j.factory[IO](
+        ContextSource.const[IO](LogContext(mdc = Mdc("request.id" -> "req-42"))),
+        Slf4j.Config(native = native)
+      )
       for {
         logger <- factory.fromName("filtered")
         _      <- logger.infoEvent("checkout.completed") { builds += 1; Event.message("accepted") }
-        _      <- Slf4j.factory[IO](native).getLoggerFromName("filtered").info { builds += 1; "rejected" }
+        _ <- Slf4j.factory[IO](Slf4j.Config(native = native)).getLoggerFromName("filtered").info {
+          builds += 1; "rejected"
+        }
       } yield {
         assertEquals(builds, 1)
         assertEquals(appender.list.size(), 1)
@@ -194,7 +199,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
           org.slf4j.MDC.clear()
           org.slf4j.MDC.put("host", "retained")
           val context = ContextSource.const[SyncIO](LogContext(mdc = Mdc("request.id" -> "req-42")))
-          val factory = Slf4j.factory[SyncIO](native, context)
+          val factory = Slf4j.factory[SyncIO](context, Slf4j.Config(native = native))
           val logger  = factory.getLoggerFromName("restoration")
           logger.info("success").unsafeRunSync()
           assertEquals(org.slf4j.MDC.getCopyOfContextMap.asScala.toMap, Map("host" -> "retained"))
@@ -219,7 +224,7 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
             def getLogger(name: String): org.slf4j.Logger = throwing
           }
           val failed = Slf4j
-            .factory[SyncIO](throwingFactory, context)
+            .factory[SyncIO](context, Slf4j.Config(native = throwingFactory))
             .getLoggerFromName("failure")
             .info("failure")
             .attempt
@@ -236,7 +241,8 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
     recording.use { case (native, appender) =>
       val failure = new RuntimeException("context failure")
       var builds  = 0
-      val factory = Slf4j.factory[IO](native, ContextSource.fromFields(IO.raiseError[Fields](failure)))
+      val factory =
+        Slf4j.factory[IO](ContextSource.fromFields(IO.raiseError[Fields](failure)), Slf4j.Config(native = native))
       for {
         logger <- factory.fromName("failed-context")
         effect = logger.info { builds += 1; "unreachable" }
@@ -246,6 +252,95 @@ final class Slf4jFactorySuite extends CatsEffectSuite {
         assertEquals(builds, 0)
         assertEquals(appender.list.size(), 0)
       }
+    }
+  }
+
+  test("Native checks skip context reads and encoding for disabled direct calls") {
+    recording.use { case (native, appender) =>
+      var encodes = 0
+      var builds  = 0
+      val encoder = new Encoder[Int] {
+        def encode[V](value: Int)(out: ValueEncoding[V]): V = { encodes += 1; out.int64(value.toLong) }
+      }
+      for {
+        reads <- Ref.of[IO, Int](0)
+        _     <- IO(native.getLogger("native-check").setLevel(NativeLevel.ERROR))
+        source = ContextSource.fromFields(reads.update(_ + 1).as(Fields(Field("value", 42)(encoder))))
+        logger = Slf4j
+          .factory[IO](source, Slf4j.Config(native = native, enablement = Slf4j.Enablement.Native))
+          .getLoggerFromName("native-check")
+        before        <- reads.get
+        _             <- logger.debug { builds += 1; "disabled" }.replicateA_(1000)
+        afterDisabled <- reads.get
+        _ <- IO {
+          assertEquals(encodes, 0)
+          assertEquals(builds, 0)
+          native.getLogger("native-check").setLevel(NativeLevel.INFO)
+        }
+        _     <- logger.info { builds += 1; "enabled" }
+        total <- reads.get
+      } yield {
+        assertEquals(before, 0)
+        assertEquals(afterDisabled, 0)
+        assertEquals(total, 1)
+        assertEquals(encodes, 1)
+        assertEquals(builds, 1)
+        assertEquals(appender.list.size(), 1)
+      }
+    }
+  }
+
+  test("MDC-aware logging uses logical MDC and differs explicitly from native-thread checks") {
+    recording.use { case (native, appender) =>
+      native.addTurboFilter(new ch.qos.logback.classic.turbo.TurboFilter {
+        override def decide(
+            marker: org.slf4j.Marker,
+            logger: ch.qos.logback.classic.Logger,
+            level: NativeLevel,
+            format: String,
+            params: Array[AnyRef],
+            error: Throwable
+        ): ch.qos.logback.core.spi.FilterReply =
+          if (org.slf4j.MDC.get("logical.request") == "req-42") ch.qos.logback.core.spi.FilterReply.ACCEPT
+          else ch.qos.logback.core.spi.FilterReply.DENY
+      })
+      var encodes = 0
+      val encoder = new Encoder[Int] {
+        def encode[V](value: Int)(out: ValueEncoding[V]): V = { encodes += 1; out.int64(value.toLong) }
+      }
+      for {
+        reads <- Ref.of[IO, Int](0)
+        source = ContextSource(
+          reads.update(_ + 1).as(LogContext(Mdc("logical.request" -> "req-42"), Fields(Field("value", 1)(encoder))))
+        )
+        aware = Slf4j.factory[IO](source, Slf4j.Config(native = native)).getLoggerFromName("aware")
+        cheap = Slf4j
+          .factory[IO](source, Slf4j.Config(native = native, enablement = Slf4j.Enablement.Native))
+          .getLoggerFromName("native")
+        _     <- aware.debug("accepted")
+        _     <- cheap.debug("rejected")
+        count <- reads.get
+      } yield {
+        assertEquals(count, 1)
+        assertEquals(encodes, 1)
+        assertEquals(appender.list.size(), 1)
+      }
+    }
+  }
+
+  test("Native disabled checks do not evaluate a failing context source") {
+    val failure = new RuntimeException("context unavailable")
+    recording.use { case (native, _) =>
+      native.getLogger("disabled-source").setLevel(NativeLevel.ERROR)
+      val source = ContextSource.fromFields(IO.raiseError[Fields](failure))
+      val cheap = Slf4j
+        .factory[IO](source, Slf4j.Config(native = native, enablement = Slf4j.Enablement.Native))
+        .getLoggerFromName("disabled-source")
+      val aware = Slf4j.factory[IO](source, Slf4j.Config(native = native)).getLoggerFromName("disabled-source")
+      for {
+        _      <- cheap.debug("disabled")
+        failed <- aware.debug("disabled").attempt
+      } yield assertEquals(failed, Left(failure): Either[Throwable, Unit])
     }
   }
 

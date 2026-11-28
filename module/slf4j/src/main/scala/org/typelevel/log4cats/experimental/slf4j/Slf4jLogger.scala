@@ -2,35 +2,54 @@ package org.typelevel.log4cats.experimental.slf4j
 
 import cats.effect.Sync
 import cats.syntax.all._
-import org.typelevel.log4cats.experimental.context.ContextSource
+import org.typelevel.log4cats.experimental.context.{ContextSource, LogContext}
 import org.slf4j.{Logger, MDC}
 import org.slf4j.event.{KeyValuePair, Level => JLevel}
 import org.typelevel.log4cats.experimental.{Body, Fields, Level, Mdc, RecordWriter}
 import org.typelevel.log4cats.experimental.internal.AccumulatingRecordWriter
 import scala.collection.JavaConverters._
 
-private[experimental] final class Slf4jLogger[F[_]](native: Logger, context: ContextSource[F])(implicit F: Sync[F])
+private[experimental] final class Slf4jLogger[F[_]](
+    native: Logger,
+    context: ContextSource[F],
+    enablement: Slf4j.Enablement = Slf4j.Enablement.MdcAware
+)(implicit F: Sync[F])
     extends org.typelevel.log4cats.experimental.Logger[F] {
-  def log(level: Level, eventName: Option[String], write: RecordWriter => Unit): F[Unit] =
-    F.defer(context.current).flatMap { ambient =>
-      isEnabled(level, ambient.mdc).flatMap {
-        case false => F.unit
-        case true =>
-          F.delay(AccumulatingRecordWriter.capture(write)).flatMap { record =>
-            prepare(
-              level,
-              eventName,
-              record.body,
-              ambient.fields ++ record.fields,
-              record.cause,
-              ambient.mdc ++ record.mdc
-            ).flatten
-          }
-      }
+  def log(level: Level, eventName: Option[String], write: RecordWriter => Unit): F[Unit] = {
+    val accepted = enablement match {
+      case Slf4j.Enablement.Native =>
+        nativeCheck(level).flatMap {
+          case false => F.pure(Option.empty[LogContext])
+          case true  => F.defer(context.current).map(data => Some(data): Option[LogContext])
+        }
+      case Slf4j.Enablement.MdcAware =>
+        F.defer(context.current).flatMap { data =>
+          accepts(level, data.mdc).map(enabled => if (enabled) Some(data) else None)
+        }
     }
+    accepted.flatMap {
+      case None => F.unit
+      case Some(ambient) =>
+        F.delay(AccumulatingRecordWriter.capture(write)).flatMap { record =>
+          prepare(
+            level,
+            eventName,
+            record.body,
+            ambient.fields ++ record.fields,
+            record.cause,
+            ambient.mdc ++ record.mdc
+          ).flatten
+        }
+    }
+  }
 
-  def isEnabled(level: Level, mdc: Mdc = Mdc.empty): F[Boolean] =
-    F.delay(withMdc(mdc.values)(native.isEnabledForLevel(severity(level))))
+  def accepts(level: Level, mdc: Mdc = Mdc.empty): F[Boolean] = enablement match {
+    case Slf4j.Enablement.Native => nativeCheck(level)
+    case Slf4j.Enablement.MdcAware =>
+      F.delay(withMdc(mdc.values)(native.isEnabledForLevel(severity(level))))
+  }
+
+  private def nativeCheck(level: Level): F[Boolean] = F.delay(native.isEnabledForLevel(severity(level)))
 
   def prepare(
       level: Level,

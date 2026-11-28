@@ -63,23 +63,30 @@ native handle. `fromName` / `fromClass` perform lookup in `F`; `getLoggerFromNam
 `getLoggerFromClass` perform lookup directly.
 
 [Slf4jLogger](module/slf4j/src/main/scala/org/typelevel/log4cats/experimental/slf4j/Slf4jLogger.scala)
-runs these steps for each logging execution:
+uses these steps with the default MDC-aware policy:
 
 1. Read diagnostic and structured context in the calling fiber.
 2. Install diagnostic MDC for the native level check.
 3. If enabled, invoke the writer once and merge each channel with its call values.
 4. Encode the structured record and emit through a fresh SLF4J builder with the captured MDC.
 
-Disabled calls still read context; they skip the writer and structured encoding. MDC already holds
+The default `Slf4j.Enablement.MdcAware` policy reads context even for disabled calls; it skips the
+writer and structured encoding. `Slf4j.Enablement.Native` checks before reading logical context,
+so disabled direct calls skip context reads and MDC installation/restoration as well. MDC already holds
 strings. Call values override context values independently in each channel. Same-key MDC and
 structured values coexist. Event-name metadata overrides an `event.name` structured field and is
 emitted only as a key-value pair; explicit MDC `event.name` remains independent.
 
 Structured fields go only to native key-value pairs, and diagnostic values go only to native MDC.
-Native checks and emission save, replace, and restore thread MDC in a `finally` block. Existing
+MDC-aware checks and emission save, replace, and restore thread MDC in a `finally` block. Existing
 thread entries are hidden during those actions. Both actions run in `F.delay`, without a blocking-pool
 boundary, so providers and appenders run on the calling thread. SLF4J supplies the timestamp; this
 path reads no clock.
+
+The SLF4J Native policy calls `isEnabledForLevel` without changing native thread state. A provider
+may still run filters consulting thread MDC. The default MdcAware policy installs captured logical
+MDC and restores thread MDC afterward. Neither forwards event-name metadata to native acceptance.
+`Slf4j.factory` and `Slf4jBackend.acquire` both accept the explicit policy.
 
 ## Direct OTel logging
 
