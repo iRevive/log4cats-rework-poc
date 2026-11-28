@@ -8,7 +8,7 @@ import munit.CatsEffectSuite
 import org.typelevel.log4cats.experimental.backend.{Backend, EncodedEvent}
 import org.typelevel.log4cats.experimental.pipeline.Pipeline
 import org.typelevel.log4cats.experimental.value.{Value, ValueBackend}
-import org.typelevel.log4cats.experimental.{Event, Field, Fields}
+import org.typelevel.log4cats.experimental.{Event, Field, Fields, Mdc}
 
 final class ContextSuite extends CatsEffectSuite {
   private type Reader[A] = Kleisli[IO, Fields, A]
@@ -109,7 +109,7 @@ final class ContextSuite extends CatsEffectSuite {
     import cats.effect.Deferred
     import org.typelevel.log4cats.experimental.Mdc
     for {
-      scoped   <- ScopedContext.create
+      scoped   <- ScopedContext.create.widen[LogScope[IO]]
       ready    <- Deferred[IO, Unit]
       restored <- Deferred[IO, LogContext]
       outer = LogContext(Mdc("id" -> "outer"), Fields(Field("id", 1)))
@@ -133,6 +133,82 @@ final class ContextSuite extends CatsEffectSuite {
         }
       }
       after <- scoped.current
+    } yield {
+      assert(after.mdc.isEmpty)
+      assert(after.fields.isEmpty)
+    }
+  }
+
+  test("IO LogScope restores both channels after failure and reused scopes read the current parent") {
+    val failure = new RuntimeException("scope failed")
+    for {
+      scope <- ScopedContext.create.widen[LogScope[IO]]
+      nested = scope.withMdc(Mdc("id" -> "nested"))
+      read   = nested(scope.source.current)
+      first  <- scope.withFields(Fields(Field("parent", 1)))(read)
+      second <- scope.withFields(Fields(Field("parent", 2)))(read)
+      failed <- scope
+        .scope(LogContext(Mdc("id" -> "temporary"), Fields(Field("id", 3))))(
+          IO.raiseError[Unit](failure)
+        )
+        .attempt
+      restored <- scope.current
+    } yield {
+      assertEquals(first.mdc.values, Map("id" -> "nested"))
+      assertEquals(second.mdc.values, Map("id" -> "nested"))
+      assertEquals(
+        first.fields.encode(org.typelevel.log4cats.experimental.encoding.ValueEncoding.value),
+        Value.Obj(Map("parent" -> Value.Int64(1)))
+      )
+      assertEquals(
+        second.fields.encode(org.typelevel.log4cats.experimental.encoding.ValueEncoding.value),
+        Value.Obj(Map("parent" -> Value.Int64(2)))
+      )
+      assertEquals(failed, Left(failure): Either[Throwable, Unit])
+      assert(restored.mdc.isEmpty)
+      assert(restored.fields.isEmpty)
+    }
+  }
+
+  test("IO replacement clears both channels and restores the parent on cancellation and failure") {
+    import cats.effect.Deferred
+    import org.typelevel.log4cats.experimental.context.syntax._
+    val parent  = LogContext(Mdc("id" -> "parent"), Fields(Field("id", 1)))
+    val failure = new RuntimeException("replacement failed")
+    for {
+      capability <- ScopedContext.create.widen[LogScope[IO]]
+      ready      <- Deferred[IO, LogContext]
+      restored   <- Deferred[IO, LogContext]
+      _ <- capability.scope(parent) {
+        implicit val scope: LogScope[IO] = capability
+        for {
+          fiber <- (scope.current.flatMap(ready.complete) *> IO.never[Unit])
+            .replaceContext(LogContext.empty)
+            .onCancel(scope.current.flatMap(restored.complete).void)
+            .start
+          inside      <- ready.get
+          sibling     <- scope.current
+          _           <- fiber.cancel
+          afterCancel <- restored.get
+          failed <- IO
+            .raiseError[Unit](failure)
+            .replaceContext(LogContext(Mdc("id" -> "replacement"), Fields(Field("new", true))))
+            .attempt
+          afterFailure <- scope.current
+        } yield {
+          assert(inside.mdc.isEmpty)
+          assert(inside.fields.isEmpty)
+          List(sibling, afterCancel, afterFailure).foreach { context =>
+            assertEquals(context.mdc.values, parent.mdc.values)
+            assertEquals(
+              context.fields.encode(org.typelevel.log4cats.experimental.encoding.ValueEncoding.value),
+              parent.fields.encode(org.typelevel.log4cats.experimental.encoding.ValueEncoding.value)
+            )
+          }
+          assertEquals(failed, Left(failure): Either[Throwable, Unit])
+        }
+      }
+      after <- capability.current
     } yield {
       assert(after.mdc.isEmpty)
       assert(after.fields.isEmpty)

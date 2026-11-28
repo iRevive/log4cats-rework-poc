@@ -96,10 +96,66 @@ check or delivery, including prepared replay and async delivery; it does not cap
 thread MDC. Use explicit logical MDC to carry values across fibers and queues. Overlay can include
 stale or unrelated entries from the current thread, so isolation remains the default.
 
-The optional runtime's `ScopedContext` supplies fiber-local scopes for both channels via
-`withMdc`, `withFields`, or `scope(LogContext(...))`, and exposes a `source` for either direct factories
-or pipelines. `LoggingContext.withContext` / `withMdc` use an existing `Local[F, LogContext]`.
-The field-only `ScopedFields` and `LoggingContext.withFields` helpers remain available.
+### Scoped logging context
+
+Core's `LogScope[F]` combines a `ContextSource[F]` with scoped updates to both channels.
+Wrap an existing `Local[F, LogContext]` without allocating or running an effect:
+
+```scala
+val scope = LogScope.fromLocal[F]
+val factory = Slf4j.factory[F](scope.source)
+
+scope.withMdc(Mdc("request.id" -> "req-42")) {
+  factory.getLoggerFromName("checkout").info("accepted")
+}
+```
+
+Nested scopes merge with the current context; inner values win independently in each channel.
+The previous context is restored when the scoped effect exits. All factories connected to the same
+source observe the scope, including early MDC-aware native checks. Per-call values still win at
+emission. A scope does not change native thread MDC directly; the SLF4J adapter installs it when checking
+or emitting a record.
+
+Use `replaceContext(context)` to replace both logical channels rather than merge them.
+`replaceContext(LogContext.empty)` temporarily clears logical context. Inner scopes can add
+values to the replacement, and exiting restores the complete previous context. This does not
+change SLF4J's native thread-MDC isolation/overlay policy.
+
+`scope(context)`, `withMdc`, `withFields`, and `replaceContext` return reusable `F ~> F`
+transformations. Each execution reads its current parent context. A one-way `F ~> G` does not provide a general way
+to translate a scope into `G ~> G`; wire a scoping capability for the target effect explicitly.
+
+To scope any effect using an implicit `LogScope[F]`, import the context syntax:
+
+```scala
+import org.typelevel.log4cats.experimental.context.syntax._
+
+implicit val logScope: LogScope[F] = LogScope.fromLocal[F]
+val factory = Slf4j.factory[F](LogScope[F].source)
+
+fetchData.flatMap(data => factory.getLoggerFromName("checkout").info(data))
+  .withMdc(Mdc("request.id" -> "req-42"))
+```
+
+The syntax also provides `effect.scope(context)`, `effect.withFields(fields)`, and
+`effect.replaceContext(context)`. It wraps the entire effect: in
+`effect.withMdc(inner).withMdc(outer)`, the inner scope wins matching keys.
+
+For IO, the optional runtime's `ScopedContext.create` allocates an `IOLocal` and returns an
+implementation of `LogScope[IO]`:
+
+```scala
+ScopedContext.create.flatMap { scope =>
+  val factory = Slf4j.factory[IO](scope.source)
+  scope.withFields(Fields(Field("service", "checkout"))) {
+    factory.getLoggerFromName("checkout").info("accepted")
+  }
+}
+```
+
+Its scopes restore on success, failure, and cancellation; child fibers inherit context and their
+updates remain isolated. Keep child-fiber lifetimes within the intended scope when inheritance
+matters. `LoggingContext` and the field-only `ScopedFields` remain available in runtime.
 
 ### OpenTelemetry
 
